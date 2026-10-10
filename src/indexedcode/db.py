@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     line_number           INTEGER CHECK (line_number IS NULL OR line_number >= 1),
     payload_json          TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload_json)),
     status                TEXT NOT NULL CHECK (status IN
-                            ('pending', 'running', 'retry', 'failed')),
+                            ('pending', 'running', 'retry', 'failed', 'done')),
     desired_revision      INTEGER NOT NULL CHECK (desired_revision > 0),
     lease_token           TEXT,
     lease_expires_at_ms   INTEGER,

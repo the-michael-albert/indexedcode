@@ -157,6 +157,36 @@ def test_metrics_failure_never_rolls_back_committed_job(db, monkeypatch):
     assert db.execute("SELECT COUNT(*) FROM functions").fetchone()[0] >= 1
 
 
+def test_publish_records_terminal_success_job_metric(db):
+    m = insert_module(db)
+    insert_file(db, m)
+    dal.enqueue_job(db, command="refresh_file", folder="", file="a.py",
+                    desired_revision=1)
+    job = dal.claim_next_job(db, now_ms=1000)
+    dal.publish_file_refresh(
+        db,
+        job=job,
+        file_row=dict(folder="", file="a.py", module_id=m),
+        classes=[],
+        functions=[
+            dict(name="do_work", qualified_name="do_work",
+                 signature="def do_work(): ...", start_line=1, end_line=2,
+                 start_byte=0, end_byte=10, source="def do_work(): ...",
+                 source_hash="deadbeef")
+        ],
+        relationships=[],
+        now_ms=2000,
+    )
+    row = db.execute(
+        "SELECT * FROM metrics WHERE metric_kind = 'job'"
+    ).fetchone()
+    assert row is not None
+    assert row["outcome"] == "success"
+    assert row["job_id"] == job["id"]
+    assert row["job_attempt"] == 1
+    assert row["command"] == "refresh_file"
+
+
 def test_retention_cleanup_deletes_old_rows_in_batches(db):
     for i in range(10):
         dal.record_metric(

@@ -183,13 +183,14 @@ def test_complete_job_requires_matching_lease_and_revision(db):
         db, job_id=job_id, lease_token=claimed["lease_token"],
         desired_revision=3, now_ms=2000,
     )
-    # The completed job leaves the queue entirely.
-    assert db.execute(
-        "SELECT COUNT(*) FROM jobs WHERE id = ?", (job_id,)
-    ).fetchone()[0] == 0
+    # The completed job is retained as terminal and never claimable again.
+    job = get_job(db, job_id)
+    assert job["status"] == "done"
+    assert job["lease_token"] is None
+    assert dal.claim_next_job(db, now_ms=3000) is None
 
 
-def test_complete_removes_terminal_job_from_queue(db):
+def test_done_job_is_terminal_and_retained(db):
     job_id = dal.enqueue_job(
         db, command="refresh_file", folder="pkg", file="a.py", desired_revision=1
     )
@@ -198,7 +199,14 @@ def test_complete_removes_terminal_job_from_queue(db):
         db, job_id=job_id, lease_token=claimed["lease_token"],
         desired_revision=1, now_ms=2000,
     )
-    assert db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+    # Retained for metrics/history, but not claimable or coalescable.
+    assert get_job(db, job_id)["status"] == "done"
+    assert dal.claim_next_job(db, now_ms=3000) is None
+    new_id = dal.enqueue_job(
+        db, command="refresh_file", folder="pkg", file="a.py", desired_revision=2
+    )
+    assert new_id != job_id
+    assert get_job(db, new_id)["status"] == "pending"
 
 
 def test_fail_job_is_terminal_until_new_revision_requeues(db):

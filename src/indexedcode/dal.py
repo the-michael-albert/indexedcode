@@ -4,7 +4,6 @@ atomic file-refresh publication (plan §5, §7.3)."""
 from __future__ import annotations
 
 import json
-import sqlite3
 import uuid
 
 JOB_COMMANDS = ("refresh_file", "remove_file", "refresh_module")
@@ -192,7 +191,12 @@ def fail_job(conn, job_id, lease_token, last_error, now_ms):
 
 
 def complete_job(conn, job_id, lease_token, desired_revision, now_ms):
-    """Complete and remove the job; verifies lease and revision first."""
+    """Complete the job under its lease; verifies revision first.
+
+    Terminal jobs are retained with status 'done' so their job-attempt
+    metrics keep a valid FK reference (plan §5.4). Claims only consider
+    pending/retry rows, so done jobs never rerun.
+    """
     row = conn.execute(
         "SELECT lease_token, desired_revision FROM jobs WHERE id = ?", (job_id,)
     ).fetchone()
@@ -203,7 +207,12 @@ def complete_job(conn, job_id, lease_token, desired_revision, now_ms):
             f"job {job_id} targets revision {row['desired_revision']},"
             f" not {desired_revision}"
         )
-    conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+    conn.execute(
+        "UPDATE jobs SET status = 'done', lease_token = NULL,"
+        " lease_expires_at_ms = NULL, last_error = NULL, updated_at_ms = ?"
+        " WHERE id = ?",
+        (now_ms, job_id),
+    )
 
 
 # --- entity_index ------------------------------------------------------------
