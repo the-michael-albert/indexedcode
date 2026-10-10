@@ -3,12 +3,16 @@
 
 import asyncio
 import json
+import os
 import sys
 
 import pytest
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PYTHONPATH = _REPO_ROOT + os.pathsep + os.path.join(_REPO_ROOT, "src")
 
 
 def run_mcp(db_path, root, script):
@@ -19,6 +23,7 @@ def run_mcp(db_path, root, script):
             command=sys.executable,
             args=["-m", "indexedcode.mcp", "--db", str(db_path),
                   "--root", str(root)],
+            env={**os.environ, "PYTHONPATH": _PYTHONPATH},
         )
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as client:

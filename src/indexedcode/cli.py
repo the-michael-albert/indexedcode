@@ -1,0 +1,238 @@
+"""Command-line adapters (plan §6).
+
+``indexedcode orchestrator serve`` — the normal local entry point:
+writer, watcher, pipeline loop, and retrieval HTTP API in one process.
+``indexedcode index once`` — one-shot reconcile-and-process. Query
+commands print bounded JSON.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import signal
+import sys
+import threading
+import time
+
+from indexedcode import retrieval
+from indexedcode.db import WriterLock, connect, initialize
+from indexedcode.pipeline import run_until_idle
+from indexedcode.reconcile import reconcile
+
+
+def _open_writer(db_path):
+    conn = connect(db_path, writer=True, threaded=True)
+    initialize(conn)
+    return conn
+
+
+def _cmd_index_once(args) -> int:
+    conn = _open_writer(args.db)
+    try:
+        with WriterLock(_writer_lock_path(args.db)):
+            result = reconcile(conn, args.root)
+            run_until_idle(conn, args.root, now_ms=int(time.time() * 1000))
+            ready = conn.execute(
+                "SELECT COUNT(*) AS c FROM files WHERE status = 'ready'"
+            ).fetchone()["c"]
+        print(json.dumps({
+            "files_ready": ready,
+            "files_refreshed": result.refresh_enqueued,
+            "files_removed": result.remove_enqueued,
+            "files_unchanged": result.unchanged,
+            "files_skipped": result.skipped,
+        }))
+        return 0
+    finally:
+        conn.close()
+
+
+def _cmd_search(args) -> int:
+    conn = connect(args.db, threaded=True)
+    try:
+        result = retrieval.search(
+            conn, args.root, args.query, mode=args.mode, limit=args.limit,
+        )
+        print(json.dumps(result))
+        return 0
+    finally:
+        conn.close()
+
+
+def _cmd_context(args) -> int:
+    conn = connect(args.db, threaded=True)
+    try:
+        result = retrieval.get_context(
+            conn, args.root, path=args.path,
+            start_line=args.start_line, end_line=args.end_line,
+        )
+        print(json.dumps(result))
+        return 0
+    finally:
+        conn.close()
+
+
+def _cmd_references(args) -> int:
+    conn = connect(args.db, threaded=True)
+    try:
+        result = retrieval.get_references(conn, args.root, args.symbol)
+        print(json.dumps(result))
+        return 0
+    finally:
+        conn.close()
+
+
+def _cmd_status(args) -> int:
+    conn = connect(args.db, threaded=True)
+    try:
+        print(json.dumps(retrieval.get_status(conn, args.root)))
+        return 0
+    finally:
+        conn.close()
+
+
+def _cmd_serve(args) -> int:
+    from indexedcode.http_api import create_server
+    from indexedcode.watcher import EventWatcher
+
+    stop = threading.Event()
+    conn = _open_writer(args.db)
+
+    with WriterLock(_writer_lock_path(args.db)):
+        # initial reconciliation: index the tree before accepting traffic
+        reconcile(conn, args.root, now_ms=int(time.time() * 1000))
+        run_until_idle(conn, args.root, now_ms=int(time.time() * 1000))
+
+        dirty = set()
+
+        def on_flush(paths):
+            dirty.update(paths)
+
+        watcher = EventWatcher(on_flush=on_flush,
+                               debounce_s=args.debounce_s)
+
+        def watch_events():
+            try:
+                from watchfiles import watch
+
+                for changes in watch(args.root, stop_event=stop,
+                                     watch_filter=None):
+                    for _kind, path in changes:
+                        rel = _relative(path, args.root)
+                        if rel:
+                            watcher.record(rel, now=time.monotonic())
+            except Exception:
+                pass  # polling fallback below keeps the index converging
+
+        threading.Thread(target=watch_events, daemon=True).start()
+
+        httpd = create_server(conn, args.root, token=args.http_token,
+                              port=args.http_port)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        print(f"listening {httpd.base_url}", file=sys.stderr, flush=True)
+
+        def request_stop(signum, frame):
+            stop.set()
+
+        signal.signal(signal.SIGTERM, request_stop)
+        signal.signal(signal.SIGINT, request_stop)
+
+        last_reconcile = time.monotonic()
+        try:
+            while not stop.is_set():
+                now = time.monotonic()
+                watcher.flush(now)
+                if dirty:
+                    dirty.clear()
+                    reconcile(conn, args.root,
+                              now_ms=int(time.time() * 1000))
+                run_until_idle(conn, args.root,
+                               now_ms=int(time.time() * 1000))
+                if now - last_reconcile >= args.poll_interval_s:
+                    reconcile(conn, args.root,
+                              now_ms=int(time.time() * 1000))
+                    last_reconcile = now
+                stop.wait(0.1)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+    conn.close()
+    return 0
+
+
+def _writer_lock_path(db_path):
+    return f"{db_path}.writerlock"
+
+
+def _relative(path, root):
+    from pathlib import Path, PurePath
+
+    try:
+        rel = Path(path).relative_to(Path(root))
+    except ValueError:
+        return None
+    if rel.parts and ".." in rel.parts:
+        return None
+    return PurePath(*rel.parts).as_posix()
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(prog="indexedcode")
+
+    def add_common(sub):
+        sub.add_argument("--root", default=".")
+        sub.add_argument("--db", default="index.sqlite")
+
+    sub = parser.add_subparsers(dest="group", required=True)
+
+    orchestrator = sub.add_parser("orchestrator")
+    serve = orchestrator.add_subparsers(dest="action", required=True)
+    serve_parser = serve.add_parser("serve")
+    add_common(serve_parser)
+    serve_parser.add_argument("--http-port", type=int, default=8765)
+    serve_parser.add_argument("--http-token", default=None)
+    serve_parser.add_argument("--debounce-s", type=float, default=0.25)
+    serve_parser.add_argument("--poll-interval-s", type=float, default=5.0)
+    serve_parser.set_defaults(func=_cmd_serve)
+
+    index = sub.add_parser("index")
+    once = index.add_subparsers(dest="action", required=True)
+    once_parser = once.add_parser("once")
+    add_common(once_parser)
+    once_parser.set_defaults(func=_cmd_index_once)
+
+    search = sub.add_parser("search")
+    search.add_argument("query")
+    add_common(search)
+    search.add_argument("--mode", default="hybrid")
+    search.add_argument("--limit", type=int, default=5)
+    search.set_defaults(func=_cmd_search)
+
+    context = sub.add_parser("context")
+    context.add_argument("path")
+    add_common(context)
+    context.add_argument("--start-line", type=int)
+    context.add_argument("--end-line", type=int)
+    context.set_defaults(func=_cmd_context)
+
+    references = sub.add_parser("references")
+    references.add_argument("symbol")
+    add_common(references)
+    references.set_defaults(func=_cmd_references)
+
+    status = sub.add_parser("status")
+    add_common(status)
+    status.set_defaults(func=_cmd_status)
+
+    return parser
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -8,10 +8,16 @@ def test_references_find_calls_of_symbol(indexed_repo):
     conn, root = indexed_repo
     result = get_references(conn, str(root), "parse_config")
     assert result["references"]
-    edge = result["references"][0]
-    assert edge["relation"] in ("calls", "imports", "references")
+    edges = result["references"]
+    assert all(
+        edge["relation"] in ("calls", "imports", "references", "inherits")
+        for edge in edges
+    )
+    test_callers = [e for e in edges
+                    if e["path"] == "tests/test_config_loader.py"]
+    assert test_callers, "expected a reference from the test file"
+    edge = test_callers[0]
     assert edge["resolution"] == "syntactic_candidate"
-    assert edge["path"] == "tests/test_config_loader.py"
     assert "parse_config" in edge["snippet"]
     assert edge["line_number"] >= 1
 

@@ -216,12 +216,18 @@ class WriterLockError(RuntimeError):
     """Another writer process already holds the database lock."""
 
 
-def connect(path, writer: bool = False) -> sqlite3.Connection:
-    """Open a connection with the plan's mandatory pragmas applied."""
+def connect(path, writer: bool = False,
+            threaded: bool = False) -> sqlite3.Connection:
+    """Open a connection with the plan's mandatory pragmas applied.
+
+    ``threaded=True`` allows use from server worker threads (HTTP/MCP);
+    callers remain responsible for serializing writes on one connection.
+    """
     conn = sqlite3.connect(
         str(path),
         timeout=BUSY_TIMEOUT_MS / 1000,
         isolation_level=None,  # explicit transaction control
+        check_same_thread=not threaded,
     )
     conn.row_factory = sqlite3.Row
     conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")

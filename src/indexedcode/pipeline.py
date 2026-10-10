@@ -39,6 +39,34 @@ MAX_ATTEMPTS = 5
 _PROCESS_COMMANDS = ("refresh_file", "remove_file")
 
 
+def run_until_idle(conn, root, *, embed=None, summarize=None, now_ms=0,
+                   step_ms=1000, max_iterations=10_000):
+    """Process every due job (advancing past retry delays) until idle.
+
+    Returns a summary dict of outcome counts. Shared by the CLI's
+    ``index once`` and the orchestrator loop.
+    """
+    now = now_ms
+    counts = {}
+    for _ in range(max_iterations):
+        outcome = process_next_job(
+            conn, root, embed=embed, summarize=summarize, now_ms=now,
+            retry_base_ms=1, retry_cap_ms=1, jitter=lambda: 0,
+        )
+        if outcome is None:
+            next_due = conn.execute(
+                "SELECT MIN(available_at_ms) AS next FROM jobs"
+                " WHERE status IN ('pending', 'retry')"
+            ).fetchone()["next"]
+            if next_due is None:
+                return counts
+            now = max(now + step_ms, next_due + 1)
+        else:
+            counts[outcome] = counts.get(outcome, 0) + 1
+            now += step_ms
+    raise RuntimeError("pipeline never went idle")
+
+
 def process_next_job(
     conn,
     root,

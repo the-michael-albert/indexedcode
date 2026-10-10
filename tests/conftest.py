@@ -243,11 +243,12 @@ def index_repo(conn, root, now_ms=1000):
 
 @pytest.fixture()
 def indexed_repo(tmp_path):
-    """A fully indexed three-file repository plus its writer connection."""
+    """A fully indexed three-file repository plus its (thread-capable)
+    writer connection, shared with the in-test HTTP adapter."""
     from indexedcode.db import connect, initialize
 
     write_repo_sources(tmp_path)
-    conn = connect(tmp_path / "index.sqlite", writer=True)
+    conn = connect(tmp_path / "index.sqlite", writer=True, threaded=True)
     initialize(conn)
     index_repo(conn, tmp_path)
     yield conn, tmp_path
