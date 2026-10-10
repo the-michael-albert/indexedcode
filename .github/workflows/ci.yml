@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  tests:
+    name: Tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: python -m pip install -e '.[test]'
+      - run: python -m pytest
+
+  artifacts:
+    name: Build and test distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install build twine uv pipx
+      - run: python -m build
+      - run: python -m twine check dist/*
+      - name: Smoke-test wheel
+        run: |
+          python -m venv .release-check/wheel
+          .release-check/wheel/bin/python -m pip install dist/*.whl
+          .release-check/wheel/bin/python -m pip check
+          .release-check/wheel/bin/python -I scripts/smoke_installed.py
+      - name: Rebuild wheel from sdist and smoke-test it
+        run: |
+          mkdir -p .release-check/from-sdist
+          python -m pip wheel --no-deps --wheel-dir .release-check/from-sdist dist/*.tar.gz
+          python -m venv .release-check/sdist
+          .release-check/sdist/bin/python -m pip install .release-check/from-sdist/*.whl
+          .release-check/sdist/bin/python -m pip check
+          .release-check/sdist/bin/python -I scripts/smoke_installed.py
+      - name: Exercise uv and pipx tool installs
+        run: |
+          UV_TOOL_DIR="$PWD/.release-check/uv-tools" UV_TOOL_BIN_DIR="$PWD/.release-check/uv-bin" \
+            uv tool install dist/*.whl
+          .release-check/uv-bin/indexedcode --version
+          PIPX_HOME="$PWD/.release-check/pipx-home" PIPX_BIN_DIR="$PWD/.release-check/pipx-bin" \
+            pipx install dist/*.whl
+          .release-check/pipx-bin/indexedcode --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+          if-no-files-found: error
