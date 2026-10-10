@@ -6,6 +6,15 @@ from __future__ import annotations
 import json
 import uuid
 
+from indexedcode.models import (
+    ClassDef,
+    EntityIndexInput,
+    FunctionDef,
+    Job,
+    NewJob,
+    RelationshipRecord,
+)
+
 JOB_COMMANDS = ("refresh_file", "remove_file", "refresh_module")
 ENTITY_TABLES = {
     "module": "modules",
@@ -52,10 +61,14 @@ class MetricValidationError(RuntimeError):
 # --- jobs -------------------------------------------------------------------
 
 
+def _job_id_of(job_id):
+    return getattr(job_id, "id", job_id)
+
+
 def enqueue_job(
     conn,
-    command,
-    folder,
+    command=None,
+    folder=None,
     file=None,
     function_name=None,
     line_number=None,
@@ -66,14 +79,31 @@ def enqueue_job(
 ):
     """Create a durable command, coalescing same-path refreshes.
 
-    A pending/retry job for the same (command, folder, file) is advanced to
-    the latest desired revision instead of duplicated. A failed job is
-    requeued with its attempt counter reset. A running job is never mutated.
+    Accepts either a NewJob model or the equivalent keyword arguments; all
+    inputs are validated by the model before any SQL runs. A pending/retry
+    job for the same (command, folder, file) is advanced to the latest
+    desired revision instead of duplicated. A failed job is requeued with
+    its attempt counter reset. A running job is never mutated. Returns the
+    resulting Job.
     """
-    if command not in JOB_COMMANDS:
-        raise ValueError(f"unknown job command: {command!r}")
-    if desired_revision <= 0:
-        raise ValueError("desired_revision must be positive")
+    if isinstance(command, NewJob):
+        spec = command
+    else:
+        spec = NewJob(
+            command=command,
+            folder=folder,
+            file=file,
+            function_name=function_name,
+            line_number=line_number,
+            desired_revision=desired_revision,
+            payload=payload or {},
+            available_at_ms=available_at_ms,
+            now_ms=now_ms,
+        )
+    command = spec.command.value
+    folder = spec.folder
+    file = spec.file
+    desired_revision = spec.desired_revision
 
     row = conn.execute(
         "SELECT id, status, desired_revision FROM jobs"
@@ -98,35 +128,41 @@ def enqueue_job(
                 desired_revision,
                 reset,
                 reset,
-                available_at_ms,
-                function_name,
-                line_number,
-                json.dumps(payload or {}),
-                now_ms,
+                spec.available_at_ms,
+                spec.function_name,
+                spec.line_number,
+                json.dumps(spec.payload),
+                spec.now_ms,
                 row["id"],
             ),
         )
-        return row["id"]
+        job_id = row["id"]
+    else:
+        cur = conn.execute(
+            "INSERT INTO jobs (command, folder, file, function_name, line_number,"
+            " payload_json, status, desired_revision, available_at_ms,"
+            " created_at_ms, updated_at_ms)"
+            " VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
+            (
+                command,
+                folder,
+                file,
+                spec.function_name,
+                spec.line_number,
+                json.dumps(spec.payload),
+                desired_revision,
+                spec.available_at_ms,
+                spec.now_ms,
+                spec.now_ms,
+            ),
+        )
+        job_id = cur.lastrowid
+    return _fetch_job(conn, job_id)
 
-    cur = conn.execute(
-        "INSERT INTO jobs (command, folder, file, function_name, line_number,"
-        " payload_json, status, desired_revision, available_at_ms,"
-        " created_at_ms, updated_at_ms)"
-        " VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
-        (
-            command,
-            folder,
-            file,
-            function_name,
-            line_number,
-            json.dumps(payload or {}),
-            desired_revision,
-            available_at_ms,
-            now_ms,
-            now_ms,
-        ),
-    )
-    return cur.lastrowid
+
+def _fetch_job(conn, job_id):
+    row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    return None if row is None else Job.model_validate(dict(row))
 
 
 def claim_next_job(conn, now_ms, lease_ms=60_000):
@@ -146,7 +182,7 @@ def claim_next_job(conn, now_ms, lease_ms=60_000):
         " updated_at_ms = ? WHERE id = ?",
         (token, now_ms + lease_ms, now_ms, row["id"]),
     )
-    return conn.execute("SELECT * FROM jobs WHERE id = ?", (row["id"],)).fetchone()
+    return _fetch_job(conn, row["id"])
 
 
 def reclaim_expired_jobs(conn, now_ms):
@@ -161,6 +197,7 @@ def reclaim_expired_jobs(conn, now_ms):
 
 
 def _require_lease(conn, job_id, lease_token):
+    job_id = _job_id_of(job_id)
     row = conn.execute(
         "SELECT lease_token FROM jobs WHERE id = ?", (job_id,)
     ).fetchone()
@@ -175,7 +212,7 @@ def retry_job(conn, job_id, lease_token, last_error, retry_at_ms, now_ms):
         "UPDATE jobs SET status = 'retry', lease_token = NULL,"
         " lease_expires_at_ms = NULL, last_error = ?, available_at_ms = ?,"
         " updated_at_ms = ? WHERE id = ?",
-        (last_error, retry_at_ms, now_ms, job_id),
+        (last_error, retry_at_ms, now_ms, _job_id_of(job_id)),
     )
 
 
@@ -186,7 +223,7 @@ def fail_job(conn, job_id, lease_token, last_error, now_ms):
         "UPDATE jobs SET status = 'failed', lease_token = NULL,"
         " lease_expires_at_ms = NULL, last_error = ?, updated_at_ms = ?"
         " WHERE id = ?",
-        (last_error, now_ms, job_id),
+        (last_error, now_ms, _job_id_of(job_id)),
     )
 
 
@@ -198,7 +235,8 @@ def complete_job(conn, job_id, lease_token, desired_revision, now_ms):
     pending/retry rows, so done jobs never rerun.
     """
     row = conn.execute(
-        "SELECT lease_token, desired_revision FROM jobs WHERE id = ?", (job_id,)
+        "SELECT lease_token, desired_revision FROM jobs WHERE id = ?",
+        (_job_id_of(job_id),),
     ).fetchone()
     if row is None or row["lease_token"] != lease_token:
         raise LeaseMismatchError(f"job {job_id} is not owned by this lease")
@@ -211,7 +249,7 @@ def complete_job(conn, job_id, lease_token, desired_revision, now_ms):
         "UPDATE jobs SET status = 'done', lease_token = NULL,"
         " lease_expires_at_ms = NULL, last_error = NULL, updated_at_ms = ?"
         " WHERE id = ?",
-        (now_ms, job_id),
+        (now_ms, _job_id_of(job_id)),
     )
 
 
@@ -231,35 +269,57 @@ def _validate_entity_ref(conn, entity_type, entity_id):
         )
 
 
+def _entity_index_input(entity_type, entity_id, **kwargs):
+    if isinstance(entity_type, EntityIndexInput):
+        return entity_type
+    return EntityIndexInput(
+        entity_type=entity_type, entity_id=entity_id, **kwargs
+    )
+
+
 def insert_entity_index(
     conn,
     entity_type,
-    entity_id,
-    search_text,
-    embedding,
-    dimensions,
-    input_hash,
-    model_fingerprint,
+    entity_id=None,
+    search_text=None,
+    embedding=None,
+    dimensions=None,
+    input_hash=None,
+    model_fingerprint=None,
     embedding_truncated=False,
     now_ms=0,
 ):
-    """Insert one search row, validating the polymorphic target exists."""
-    _validate_entity_ref(conn, entity_type, entity_id)
+    """Insert one search row, validating the polymorphic target exists.
+
+    Accepts an EntityIndexInput model or the equivalent keyword arguments.
+    """
+    inp = _entity_index_input(
+        entity_type,
+        entity_id,
+        search_text=search_text,
+        embedding=embedding,
+        dimensions=dimensions,
+        input_hash=input_hash,
+        model_fingerprint=model_fingerprint,
+        embedding_truncated=embedding_truncated,
+        now_ms=now_ms,
+    )
+    _validate_entity_ref(conn, inp.entity_type.value, inp.entity_id)
     conn.execute(
         "INSERT INTO entity_index (entity_type, entity_id, search_text,"
         " embedding, embedding_dimensions, input_hash, model_fingerprint,"
         " embedding_truncated, updated_at_ms)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            entity_type,
-            entity_id,
-            search_text,
-            embedding,
-            dimensions,
-            input_hash,
-            model_fingerprint,
-            1 if embedding_truncated else 0,
-            now_ms,
+            inp.entity_type.value,
+            inp.entity_id,
+            inp.search_text,
+            inp.embedding,
+            inp.dimensions,
+            inp.input_hash,
+            inp.model_fingerprint,
+            1 if inp.embedding_truncated else 0,
+            inp.now_ms,
         ),
     )
 
@@ -267,17 +327,28 @@ def insert_entity_index(
 def upsert_entity_index(
     conn,
     entity_type,
-    entity_id,
-    search_text,
-    embedding,
-    dimensions,
-    input_hash,
-    model_fingerprint,
+    entity_id=None,
+    search_text=None,
+    embedding=None,
+    dimensions=None,
+    input_hash=None,
+    model_fingerprint=None,
     embedding_truncated=False,
     now_ms=0,
 ):
     """Replace the search row for an entity after a re-embedding."""
-    _validate_entity_ref(conn, entity_type, entity_id)
+    inp = _entity_index_input(
+        entity_type,
+        entity_id,
+        search_text=search_text,
+        embedding=embedding,
+        dimensions=dimensions,
+        input_hash=input_hash,
+        model_fingerprint=model_fingerprint,
+        embedding_truncated=embedding_truncated,
+        now_ms=now_ms,
+    )
+    _validate_entity_ref(conn, inp.entity_type.value, inp.entity_id)
     conn.execute(
         "INSERT INTO entity_index (entity_type, entity_id, search_text,"
         " embedding, embedding_dimensions, input_hash, model_fingerprint,"
@@ -292,15 +363,15 @@ def upsert_entity_index(
         " embedding_truncated = excluded.embedding_truncated,"
         " updated_at_ms = excluded.updated_at_ms",
         (
-            entity_type,
-            entity_id,
-            search_text,
-            embedding,
-            dimensions,
-            input_hash,
-            model_fingerprint,
-            1 if embedding_truncated else 0,
-            now_ms,
+            inp.entity_type.value,
+            inp.entity_id,
+            inp.search_text,
+            inp.embedding,
+            inp.dimensions,
+            inp.input_hash,
+            inp.model_fingerprint,
+            1 if inp.embedding_truncated else 0,
+            inp.now_ms,
         ),
     )
 
@@ -414,7 +485,7 @@ def _insert_class_row(conn, file_id, cls, now_ms):
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             file_id,
-            cls.get("parent_class_id"),
+            cls["parent_class_id"],
             cls["name"],
             cls["qualified_name"],
             cls["kind"],
@@ -438,8 +509,8 @@ def _insert_function_row(conn, file_id, fn, now_ms):
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             file_id,
-            fn.get("class_id"),
-            fn.get("parent_function_id"),
+            fn["class_id"],
+            fn["parent_function_id"],
             fn["name"],
             fn["qualified_name"],
             fn["signature"],
@@ -459,10 +530,21 @@ def publish_file_refresh(conn, job, file_row, classes, functions, relationships,
                          now_ms, indexed_hash=None):
     """Replace a file's snapshot atomically, then complete its job.
 
+    Accepts ClassDef/FunctionDef/RelationshipRecord models or the equivalent
+    dicts; all entities are validated by their models before any SQL runs.
     Either the previous complete snapshot or the next one is visible to
     readers. Metrics are appended best-effort after the commit and can never
     roll back a successful publication.
     """
+    classes = [c if isinstance(c, ClassDef) else ClassDef.model_validate(c)
+               for c in classes]
+    functions = [f if isinstance(f, FunctionDef) else FunctionDef.model_validate(f)
+                 for f in functions]
+    relationships = [
+        r if isinstance(r, RelationshipRecord)
+        else RelationshipRecord.model_validate(r)
+        for r in relationships
+    ]
     conn.execute("BEGIN IMMEDIATE")
     try:
         file_id = conn.execute(
@@ -493,9 +575,9 @@ def publish_file_refresh(conn, job, file_row, classes, functions, relationships,
                     rel["source_type"],
                     rel["source_id"],
                     rel["relation"],
-                    rel.get("target_type"),
-                    rel.get("target_id"),
-                    rel.get("target_name"),
+                    rel["target_type"],
+                    rel["target_id"],
+                    rel["target_name"],
                     file_id,
                     rel["line_number"],
                     rel["resolution"],
