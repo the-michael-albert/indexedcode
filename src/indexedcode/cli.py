@@ -92,6 +92,17 @@ def _cmd_status(args) -> int:
         conn.close()
 
 
+def _cmd_setup(args) -> int:
+    from indexedcode.setup_ui import launch_setup
+
+    selected = launch_setup(root=args.root, db=args.db, port=args.http_port)
+    if selected is None:
+        return 0
+    args.root, args.db, args.http_port = selected
+    print(f"watching {args.root}", file=sys.stderr, flush=True)
+    return _cmd_serve(args)
+
+
 def _cmd_serve(args) -> int:
     from indexedcode.http_api import create_server
     from indexedcode.watcher import EventWatcher
@@ -178,13 +189,32 @@ def _relative(path, root):
 
 
 def build_parser():
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        installed_version = version("indexedcode")
+    except PackageNotFoundError:
+        installed_version = "unknown (not installed)"
     parser = argparse.ArgumentParser(prog="indexedcode")
+    parser.add_argument("--version", action="version",
+                        version=f"%(prog)s {installed_version}")
 
     def add_common(sub):
         sub.add_argument("--root", default=".")
         sub.add_argument("--db", default="index.sqlite")
 
     sub = parser.add_subparsers(dest="group", required=True)
+
+    setup = sub.add_parser(
+        "setup", help="interactively choose and watch a repository",
+    )
+    setup.add_argument("--root", default=".")
+    setup.add_argument("--db", default=None)
+    setup.add_argument("--http-port", type=int, default=8765)
+    setup.add_argument("--http-token", default=None)
+    setup.add_argument("--debounce-s", type=float, default=0.25)
+    setup.add_argument("--poll-interval-s", type=float, default=5.0)
+    setup.set_defaults(func=_cmd_setup)
 
     orchestrator = sub.add_parser("orchestrator")
     serve = orchestrator.add_subparsers(dest="action", required=True)

@@ -67,6 +67,22 @@ def test_index_once_is_idempotent(tmp_path, capsys):
     assert summary["files_refreshed"] == 0  # nothing changed
 
 
+def test_version_uses_package_metadata(monkeypatch, capsys):
+    monkeypatch.setattr("importlib.metadata.version", lambda name: "1.2.3")
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--version"])
+    assert excinfo.value.code == 0
+    assert capsys.readouterr().out == "indexedcode 1.2.3\n"
+
+
+def test_module_entrypoint():
+    result = subprocess.run(
+        [sys.executable, "-m", "indexedcode", "--help"],
+        capture_output=True, text=True, check=True,
+    )
+    assert "orchestrator" in result.stdout
+
+
 def test_unknown_command_exits_nonzero(tmp_path):
     with pytest.raises(SystemExit) as excinfo:
         main(["frobnicate", "--db", str(tmp_path / "x.sqlite")])
