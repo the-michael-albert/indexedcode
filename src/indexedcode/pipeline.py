@@ -99,24 +99,27 @@ def process_next_job(
     t0 = time.perf_counter()
     label = (f"{job.folder}/{job.file}" if job.folder
              else (job.file or job.command))
+    job_label = f"#{job.id} {job.command} {label}"
+    logger.info("RUNNING  %s (attempt %d/%d)", job_label,
+                job["attempt_count"], MAX_ATTEMPTS)
 
     def finish_retry(code, message, detail=None):
         if job["attempt_count"] >= MAX_ATTEMPTS:
-            logger.error("failed %s: %s: %s (gave up after %d attempts)",
-                         label, code, message, job["attempt_count"])
+            logger.error("FAILED   %s: %s: %s (gave up after %d attempts)",
+                         job_label, code, message, job["attempt_count"])
             fail_job(conn, job.id, job.lease_token, f"{code}: {message}",
                      now_ms)
             _record(conn, job, "failed", code, queue_duration,
                     started, now_ms, detail)
             return "failed"
-        logger.debug("retry %s: %s: %s (attempt %d/%d)", label, code,
-                     message, job["attempt_count"], MAX_ATTEMPTS)
         delay = min(
             retry_cap_ms,
             retry_base_ms * 2 ** (job["attempt_count"] - 1),
         )
         if jitter is not None:
             delay += max(0, jitter())
+        logger.warning("RETRY    %s: %s: %s (next attempt in %d ms)",
+                       job_label, code, message, delay)
         retry_job(conn, job.id, job.lease_token, f"{code}: {message}",
                   now_ms + delay, now_ms)
         _record(conn, job, "retry", code, queue_duration,
@@ -124,7 +127,7 @@ def process_next_job(
         return "retried"
 
     if job.command not in _PROCESS_COMMANDS:
-        logger.error("failed %s: unsupported command %s", label, job.command)
+        logger.error("FAILED   %s: unsupported command", job_label)
         fail_job(conn, job.id, job.lease_token,
                  f"unsupported command: {job.command}", now_ms)
         _record(conn, job, "failed", "unsupported_command", queue_duration,
@@ -140,7 +143,7 @@ def process_next_job(
         complete_job(conn, job.id, job.lease_token, job.desired_revision,
                      now_ms)
         _record(conn, job, "success", None, queue_duration, started, now_ms)
-        logger.info("removed %s", rel)
+        logger.info("DONE     %s", job_label)
         return "removed"
 
     # --- refresh_file -----------------------------------------------------
@@ -288,7 +291,7 @@ def process_next_job(
         " observed_hash = ?, updated_at_ms = ? WHERE folder = ? AND file = ?",
         (stat.st_mtime_ns, stat.st_size, digest, now_ms, folder, file),
     )
-    logger.info("indexed %s (%d functions, %d classes, %d ms)", rel,
+    logger.info("DONE     %s (%d functions, %d classes, %d ms)", job_label,
                 len(functions), len(classes),
                 round((time.perf_counter() - t0) * 1000))
     return "completed"

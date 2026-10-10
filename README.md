@@ -72,14 +72,16 @@ HTTP has no authentication by default; keep it local. `--http-token` enables bea
 `indexedcode setup`, `orchestrator serve`, and `index once` print progress to **stderr** as it happens:
 
 ```text
-16:43:58 INFO    watching /path/to/repo
-16:43:58 INFO    initial scan: 2 to index, 0 to remove, 0 unchanged
-16:43:58 INFO    indexed one.py (1 functions, 0 classes, 1 ms)
-16:43:58 ERROR   failed bad.py: parse_error: tree-sitter reported syntax errors (gave up after 5 attempts)
-16:44:02 INFO    periodic scan: 1 to index, 0 to remove, 2 unchanged
+16:49:40 INFO    watching /path/to/repo
+16:49:40 INFO    QUEUED   #1 refresh_file one.py
+16:49:40 INFO    RUNNING  #1 refresh_file one.py (attempt 1/5)
+16:49:40 INFO    DONE     #1 refresh_file one.py (1 functions, 0 classes, 1 ms)
+16:49:44 INFO    QUEUED   #2 refresh_file added.py
+16:49:44 INFO    RUNNING  #2 refresh_file added.py (attempt 1/5)
+16:49:44 INFO    DONE     #2 refresh_file added.py (1 functions, 0 classes, 2 ms)
 ```
 
-Use `-v` for debug detail (every HTTP request, scans that found nothing, each retry) and `-q` for warnings and errors only; put the flag before the command, e.g. `indexedcode -v orchestrator serve ...`. stdout is reserved for JSON results, so `indexedcode search ... | jq` is unaffected, and `2>server.log` captures the log. A file with a syntax error is reported once and tried again only after it changes.
+The default log shows every job being queued, started, completed, retried, or failed. Use `-v` for extra debug detail (HTTP requests and scans that found nothing) and `-q` for warnings and errors only; put the flag before the command, e.g. `indexedcode -v orchestrator serve ...`. stdout is reserved for JSON results, so `indexedcode search ... | jq` is unaffected, and `2>server.log` captures the log. A file with a syntax error is reported once and tried again only after it changes.
 
 ## Web dashboard and `llms.txt`
 

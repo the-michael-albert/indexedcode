@@ -11,11 +11,15 @@ deleted. A permission error never means deleted.
 
 from __future__ import annotations
 
+import logging
 import os
 
 from indexedcode.dal import enqueue_job, ensure_file_row
 from indexedcode.scan import scan_repository
 from indexedcode.stable import read_stable
+
+
+logger = logging.getLogger(__name__)
 
 
 class ReconcileResult:
@@ -130,7 +134,7 @@ def _enqueue_refresh(conn, row, stat, digest, now_ms, language, is_test):
         (language, int(bool(is_test)), revision, stat.st_mtime_ns,
          stat.st_size, digest, now_ms, row["id"]),
     )
-    enqueue_job(
+    job = enqueue_job(
         conn,
         command="refresh_file",
         folder=row["folder"],
@@ -138,6 +142,9 @@ def _enqueue_refresh(conn, row, stat, digest, now_ms, language, is_test):
         desired_revision=revision,
         now_ms=now_ms,
     )
+    rel = (f"{row['folder']}/{row['file']}" if row["folder"]
+           else row["file"])
+    logger.info("QUEUED   #%d refresh_file %s", job.id, rel)
 
 
 def _enqueue_removals(conn, seen, result, now_ms):
@@ -150,13 +157,14 @@ def _enqueue_removals(conn, seen, result, now_ms):
             continue
         if _has_pending_job(conn, row["folder"], row["file"], "remove_file"):
             continue
-        enqueue_job(
+        job = enqueue_job(
             conn,
             command="remove_file",
             folder=row["folder"],
             file=row["file"],
             now_ms=now_ms,
         )
+        logger.info("QUEUED   #%d remove_file %s", job.id, rel)
         result.remove_enqueued += 1
 
 
