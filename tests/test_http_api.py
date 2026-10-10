@@ -121,6 +121,14 @@ def test_unknown_endpoint_is_404(server):
     assert excinfo.value.code == 404
 
 
+def test_non_loopback_bind_requires_a_token(indexed_repo):
+    from indexedcode.http_api import create_server as build
+
+    conn, root = indexed_repo
+    with pytest.raises(ValueError, match="token"):
+        build(conn, str(root), token=None, host="0.0.0.0")
+
+
 def test_no_token_configured_allows_local_access(indexed_repo):
     conn, root = indexed_repo
     httpd = create_server(conn, str(root), token=None)

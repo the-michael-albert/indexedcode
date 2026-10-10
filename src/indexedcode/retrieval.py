@@ -303,7 +303,7 @@ def _path_context(conn, root, path, start_line, end_line, cursor,
         raise ContextError(f"no such file: {path}")
 
     version = _index_version(conn)
-    offset_line = start_line or 1
+    offset_line = max(1, start_line or 1)
     if cursor is not None:
         payload = _decode_cursor(cursor)
         if payload["v"] != version:
