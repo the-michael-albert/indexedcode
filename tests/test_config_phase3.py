@@ -82,3 +82,16 @@ remote_token = "tok"
     cfg = load_config(path)
     assert cfg["embedding"]["remote_token"] == "tok"
     assert cfg["summarization"]["remote_token"] is None
+
+
+def test_remote_url_must_use_https(tmp_path):
+    from indexedcode.config import ConfigError, load_config
+
+    path = write(tmp_path, """
+[embedding]
+mode = "remote"
+backend = "rocm"
+remote_url = "http://w.internal"
+""")
+    with pytest.raises(ConfigError, match="https"):
+        load_config(path)

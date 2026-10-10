@@ -97,6 +97,12 @@ def load_config(path):
             raise ConfigError(
                 f'{section}.mode = "remote" requires a remote_url'
             )
+        remote_url = cfg[section].get("remote_url")
+        if remote_url and not str(remote_url).startswith("https://"):
+            raise ConfigError(
+                f"{section}.remote_url must use https://"
+                " (bearer authentication requires encrypted transport)"
+            )
 
     for section, key in _POSITIVE_INTS:
         value = cfg[section][key]

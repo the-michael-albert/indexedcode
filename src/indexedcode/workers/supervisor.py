@@ -196,7 +196,7 @@ class ManagedWorker:
         time.sleep(delay)
         try:
             self._spawn_and_wait_ready()
-        except WorkerError:
+        except Exception:
             self.state = "failed"
             self._terminal_failure = True
 
