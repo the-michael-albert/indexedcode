@@ -1,6 +1,6 @@
 # IndexedCode implementation plan
 
-**Status:** Proposed; revised to the seven-table logical schema and a single-process orchestrator with optional managed inference workers. Awaiting feedback. No application code is currently present.
+**Status:** Proposed; revised to the eight-table logical schema and a single-process orchestrator with optional managed inference workers. Awaiting feedback. No application code is currently present.
 
 ## 1. Objective
 
@@ -17,7 +17,7 @@ For each inference capability, configuration selects one of two modes:
 | `managed` | The orchestrator starts, waits for, monitors, and gracefully stops a local inference worker. |
 | `remote` | The orchestrator does not start a process; it calls a configured authenticated remote endpoint. |
 
-Use **SQLite with sqlite-vec**, not Turso, for version one. Managed MLX workers run only on Apple Silicon/macOS; managed ROCm workers run only on their compatible AMD/Linux host. An orchestrator cannot spawn a worker on a different machine. The remote mode preserves deployment on a separate box; that host runs the embedding/summarization worker under its own local process manager or a separate IndexedCode orchestrator.
+Use **SQLite** (with optional sqlite-vec; see §5.3), not Turso, for version one. Managed MLX workers run only on Apple Silicon/macOS; managed ROCm workers run only on their compatible AMD/Linux host. An orchestrator cannot spawn a worker on a different machine. The remote mode preserves deployment on a separate box; that host runs the embedding/summarization worker under its own local process manager or a separate IndexedCode orchestrator.
 
 The all-local managed default has a **target total memory envelope of approximately 1–2.5 GB** under its documented default workload: a warm orchestrator, one 384-dimension embedding model, a quantized Qwen2.5-Coder-0.5B-Instruct worker, one active summary at a time, 4,096 input tokens, 256 output tokens, and a repository index at the initial supported scale. This is a target to measure and enforce through admission limits, not a universal hardware guarantee. Full-precision models, larger contexts, concurrent summaries, large SQLite caches, or other workloads can exceed it; use remote workers for those configurations.
 
@@ -52,7 +52,7 @@ All inference uses the same versioned HTTP contract, including managed workers. 
 - Python 3.11+, FastAPI/Uvicorn, HTTPX, and validated configuration.
 - Tree-sitter with pinned language grammars.
 - watchfiles for debounced events, plus scan/reconciliation and polling fallback.
-- SQLite WAL and sqlite-vec. No extra logical cache, metadata, import, occurrence, or migration tables in version one.
+- SQLite WAL. sqlite-vec is an optional physical performance upgrade (see §5.3), not a version-one requirement; exact float32-blob cosine search is the initial implementation. No extra logical cache, metadata, import, occurrence, or migration tables in version one.
 - MLX: `mlx-lm` for Qwen and `mlx-embeddings` for embedding inference.
 - ROCm: HIP-enabled PyTorch and Transformers. Refuse startup when ROCm/HIP is requested but unavailable; never silently use CPU.
 - Quantized Qwen2.5-Coder-0.5B-Instruct and a compact 384-dimension embedding model for the 1–2.5 GB managed-local target; model weights are loaded once per worker, never per request.
@@ -184,7 +184,7 @@ The first version has **eight application tables**. The data model diagram is [i
 - `modules`, `files`, `classes`, and `functions` own the repository hierarchy through normal foreign keys.
 - `relationships` stores many-to-many code connections such as imports, calls, inheritance, and references. It is not a compiler-grade call graph.
 - `entity_index` has one searchable row for each module, file, class, or function. It is deliberately polymorphic; SQLite cannot make `entity_type + entity_id` a conditional foreign key, so the writer validates it transactionally.
-- `jobs` implements the Command pattern. It uses folder/file and optional function/line as routing hints; the crawler always reparses the full file because paths, functions, and lines move.
+- `jobs` implements the Command pattern. It uses folder/file and optional function/line as routing hints; the crawler always reparses the full file because paths, functions, and lines move. Refresh coalescing happens inside the single writer's enqueue transaction, so watcher events and reconciliation scans cannot race to enqueue duplicate commands.
 - `metrics` is append-only, bounded-retention observability data for requests and completed job attempts. It must not affect job completion or retrieval availability.
 - Source line numbers are 1-based and inclusive. Byte offsets are 0-based with exclusive end offsets.
 - All paths are normalized repository-relative POSIX paths. The application, not SQL, enforces canonical-root containment, exclusions, and symlink rejection.
@@ -350,7 +350,8 @@ CREATE TABLE relationships (
                             ('unresolved', 'syntactic_candidate', 'resolved')),
     snippet               TEXT NOT NULL,
     CHECK (
-      (target_id IS NOT NULL AND target_type IS NOT NULL) OR target_name IS NOT NULL
+      (target_id IS NULL) = (target_type IS NULL)
+      AND (target_id IS NOT NULL OR target_name IS NOT NULL)
     )
 );
 CREATE INDEX relationships_source_idx ON relationships(source_type, source_id, relation);
@@ -409,7 +410,7 @@ The application serializes embeddings as little-endian float32 and verifies dime
 
 ### 5.3 sqlite-vec implementation choice
 
-`entity_index` is the logical vector index. Two implementation paths remain compatible with the seven-table model:
+`entity_index` is the logical vector index. Two implementation paths remain compatible with the eight-table model:
 
 1. **Initial/default:** store the float32 embedding blob in `entity_index` and calculate exact cosine distance for the selected candidate set.
 2. **Performance upgrade:** add a sqlite-vec virtual index that mirrors `entity_index.id`, managed entirely by the writer in the same transaction.
@@ -532,7 +533,7 @@ Treat retrieved code, comments, and generated summaries as untrusted content—n
 
 ## 9. Implementation sequence and gates
 
-### Phase 1 — Package, configuration, seven-table store
+### Phase 1 — Package, configuration, eight-table store
 
 Create packaging, validated configuration, DDL, writer lock, SQLite preflight, single-writer/read-connection behavior, and data access layer.
 
@@ -576,7 +577,7 @@ Evaluate agent usefulness with fixed locate/behavior/debug/test tasks: top-five 
 - Treat `metrics` as operational data: retain only low-cardinality operation/component/error dimensions and approved numeric counters; never place source, prompts, responses, tokens, paths, URLs with user data, or raw exceptions in it.
 - Source is sent to managed local workers or configured remote model machines; document that boundary and secure it.
 - A local orchestrator may supervise only local MLX/ROCm workers compatible with its own platform. A separate-machine worker must be configured as `remote` and supervised on that machine.
-- sqlite-vec exact similarity supports the initial scale but does not promise ANN performance for very large codebases.
+- Exact blob-backed similarity supports the initial scale; optional sqlite-vec adds vector search after measurement but does not promise ANN performance for very large codebases.
 - MiniLM is a lightweight baseline, not a claim of optimal code retrieval quality.
 - The 1–2.5 GB target is a measured managed-local deployment profile, not a maximum safe process limit or a guarantee across models, OS versions, framework versions, hardware, and concurrent workloads. Exceeding it requires explicit opt-in or remote inference.
 - Deferred: Turso backend, full compiler/LSP symbol resolution, LLM-generated call graphs, MCP code modification/execution, automatic agent configuration, cross-repository federation, and additional physical FTS/vector tables unless benchmarks justify them.
