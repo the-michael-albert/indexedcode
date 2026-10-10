@@ -131,3 +131,47 @@ def wait_until(predicate, timeout=10.0, interval=0.05):
             return result
         time.sleep(interval)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: deterministic inference fakes and pipeline helpers
+# ---------------------------------------------------------------------------
+
+def fake_vector(text, dimensions=3):
+    """A deterministic unit-norm vector derived from the text."""
+    import hashlib
+    import math
+
+    digest = hashlib.sha256(text.encode("utf-8")).digest()
+    values = [
+        (b / 255.0) - 0.5
+        for b in digest[:dimensions]
+    ]
+    norm = math.sqrt(sum(v * v for v in values)) or 1.0
+    return [v / norm for v in values]
+
+
+class FakeEmbedder:
+    """Counts calls so tests can prove changed-entity-only inference."""
+
+    def __init__(self, error=None):
+        self.calls = []
+        self.error = error
+
+    def __call__(self, texts):
+        if self.error is not None:
+            raise self.error
+        self.calls.append(list(texts))
+        return [fake_vector(text) for text in texts]
+
+
+class FakeSummarizer:
+    def __init__(self, error=None):
+        self.calls = []
+        self.error = error
+
+    def __call__(self, texts):
+        if self.error is not None:
+            raise self.error
+        self.calls.append(list(texts))
+        return [f"summary of {t[:24]}" for t in texts]
