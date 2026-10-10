@@ -9,6 +9,7 @@ exclusive ends, and `source` is always the exact source slice.
 from __future__ import annotations
 
 import hashlib
+from bisect import bisect_right
 from pathlib import PurePosixPath
 
 import tree_sitter_c
@@ -117,7 +118,7 @@ def _lines_index(source: bytes):
 
 
 def _line_snippet(source: bytes, starts, byte_offset: int) -> str:
-    line_no = sum(1 for s in starts if s <= byte_offset)
+    line_no = bisect_right(starts, byte_offset)
     begin = starts[line_no - 1]
     end = starts[line_no] - 1 if line_no < len(starts) else len(source)
     return source[begin:end].decode("utf-8", "replace").strip()[:200]
