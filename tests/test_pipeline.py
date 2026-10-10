@@ -445,3 +445,31 @@ def test_files_row_created_by_pipeline_when_missing(db, repo):
     )
     assert outcome == "completed"
     assert indexed_file_row(db, "src", "new.py")["status"] == "ready"
+
+
+def test_imports_and_calls_publish_with_file_level_sources(db, repo):
+    """File-level relationship edges (imports) resolve to the file row,
+    never a NULL source_id."""
+    (repo / "src").mkdir(exist_ok=True)
+    (repo / "src" / "a.py").write_text(
+        "import os\n\n\ndef foo():\n    os.getcwd()\n"
+    )
+    enqueue_job(
+        db, command="refresh_file", folder="src", file="a.py", now_ms=0
+    )
+    outcome = process_next_job(
+        db, str(repo), embed=FakeEmbedder(), summarize=FakeSummarizer(),
+        now_ms=1,
+    )
+    assert outcome == "completed"
+    file_id = indexed_file_row(db, "src", "a.py")["id"]
+    foo_id = function_row(db, file_id, "foo")["id"]
+    edges = db.execute(
+        "SELECT source_type, source_id, relation, target_name"
+        " FROM relationships ORDER BY relation"
+    ).fetchall()
+    by_relation = {edge["relation"]: edge for edge in edges}
+    assert by_relation["imports"]["source_id"] == file_id
+    assert by_relation["imports"]["source_type"] == "file"
+    assert by_relation["calls"]["source_id"] == foo_id
+    assert by_relation["calls"]["source_type"] == "function"

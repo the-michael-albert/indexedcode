@@ -658,6 +658,10 @@ def publish_file_refresh(conn, job, file_row, classes, functions, relationships,
                 source_id = function_ids.get(rel.source_qname)
                 if source_id is None:
                     source_id = class_ids.get(rel.source_qname)
+                if source_id is None:
+                    # file-level edge (e.g. imports): the origin file is
+                    # the relationship's source entity
+                    source_id = file_id
             conn.execute(
                 "INSERT INTO relationships (source_type, source_id, relation,"
                 " target_type, target_id, target_name, origin_file_id,"

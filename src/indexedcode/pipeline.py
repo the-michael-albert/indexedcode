@@ -319,12 +319,14 @@ def _existing_snapshot(conn, file_row):
         (file_id,),
     ):
         qname_by_id[("class", row["id"])] = row["qualified_name"]
-    for row in conn.execute(
-        "SELECT * FROM entity_index WHERE entity_type IN ('function', 'class')"
-    ):
-        qname = qname_by_id.get((row["entity_type"], row["entity_id"]))
-        if qname is not None:
-            index[(row["entity_type"], qname)] = row
+    for entity_type, entity_id in qname_by_id:
+        row = conn.execute(
+            "SELECT * FROM entity_index WHERE entity_type = ?"
+            " AND entity_id = ?",
+            (entity_type, entity_id),
+        ).fetchone()
+        if row is not None:
+            index[(entity_type, qname_by_id[(entity_type, entity_id)])] = row
     return hashes, index
 
 
