@@ -141,3 +141,184 @@ def test_no_token_configured_allows_local_access(indexed_repo):
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+# --- web UI and queue ---------------------------------------------------------
+
+
+def _get(url, headers=None):
+    req = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=10) as response:
+        return response.status, response.headers, response.read()
+
+
+def test_root_serves_ui_page_without_a_token(server):
+    # the page itself holds no index data; its API calls still need the token
+    status, headers, body = _get(server.base_url + "/")
+    assert status == 200
+    assert headers["Content-Type"].startswith("text/html")
+    assert b"IndexedCode" in body
+    assert "default-src 'none'" in headers["Content-Security-Policy"]
+    assert headers["X-Content-Type-Options"] == "nosniff"
+
+
+def test_ui_is_packaged_as_package_data():
+    from importlib import resources
+
+    page = resources.files("indexedcode") / "web" / "index.html"
+    assert page.is_file()
+
+
+def test_queue_requires_token(server):
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        request(server, "/v1/queue", token=None)
+    assert excinfo.value.code == 401
+
+
+def test_queue_empty_when_fully_indexed(server):
+    status, body = request(server, "/v1/queue")
+    assert status == 200
+    assert body["total"] == 0 and body["jobs"] == []
+    assert body["last_updated_ms"] is not None
+    assert body["recent_functions"]
+    assert {"qualified_name", "path", "start_line", "updated_at_ms"} <= set(
+        body["recent_functions"][0]
+    )
+
+
+def test_queue_lists_pending_file_with_its_functions(indexed_repo):
+    from indexedcode.reconcile import reconcile
+
+    conn, root = indexed_repo
+    target = root / "src" / "config_loader.py"
+    target.write_text(target.read_text() + "\n# changed\n")
+    reconcile(conn, str(root), now_ms=5_000)
+
+    httpd = create_server(conn, str(root), token=None)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _, _, raw = _get(httpd.base_url + "/v1/queue")
+        body = json.loads(raw)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+    assert body["total"] == 1
+    job = body["jobs"][0]
+    assert job["status"] == "pending"
+    assert job["path"] == "src/config_loader.py"
+    assert job["queued_at_ms"] == 5_000
+    assert "parse_config" in [f["qualified_name"] for f in job["functions"]]
+    assert job["function_count"] == len(job["functions"])
+
+
+def test_queue_orders_running_before_pending_and_reports_errors(indexed_repo):
+    from indexedcode.dal import enqueue_job
+
+    conn, _ = indexed_repo
+    enqueue_job(conn, command="refresh_file", folder="src", file="a.py",
+                now_ms=10)
+    enqueue_job(conn, command="refresh_file", folder="src", file="b.py",
+                now_ms=20)
+    conn.execute("UPDATE jobs SET status='failed', last_error='boom',"
+                 " attempt_count=3 WHERE file='a.py'")
+    from indexedcode.retrieval import get_queue
+
+    body = get_queue(conn, now_ms=99)
+    assert [j["status"] for j in body["jobs"]] == ["pending", "failed"]
+    failed = body["jobs"][1]
+    assert failed["last_error"] == "boom" and failed["attempts"] == 3
+    assert failed["function_count"] == 0 and failed["functions"] == []
+
+
+def test_queue_limit_marks_truncation(indexed_repo):
+    from indexedcode.dal import enqueue_job
+    from indexedcode.retrieval import get_queue
+
+    conn, _ = indexed_repo
+    for i in range(5):
+        enqueue_job(conn, command="refresh_file", folder="src",
+                    file=f"f{i}.py", now_ms=i + 1)
+    body = get_queue(conn, now_ms=100, limit=2)
+    assert body["total"] == 5 and body["truncated"] is True
+    assert len(body["jobs"]) == 2
+
+
+def test_foreign_host_header_is_rejected_without_a_token(indexed_repo):
+    conn, root = indexed_repo
+    httpd = create_server(conn, str(root), token=None)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        for path in ("/", "/v1/status", "/v1/queue"):
+            with pytest.raises(urllib.error.HTTPError) as excinfo:
+                _get(httpd.base_url + path, {"Host": "evil.example:8765"})
+            assert excinfo.value.code == 403
+        # loopback host names remain accepted
+        for host in ("localhost:8765", "127.0.0.1:8765"):
+            status, _, _ = _get(httpd.base_url + "/v1/status", {"Host": host})
+            assert status == 200
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+# --- llms.txt -------------------------------------------------------------------
+
+
+def test_llms_txt_is_served_without_a_token_and_uses_the_real_base_url(server):
+    status, headers, body = _get(server.base_url + "/llms.txt")
+    text = body.decode()
+    assert status == 200
+    assert headers["Content-Type"].startswith("text/plain")
+    assert text.startswith("# IndexedCode\n")
+    assert f"{server.base_url}/v1/search" in text
+    assert "{base}" not in text and "{auth}" not in text
+    # a token is configured on this fixture: the doc must say how to send it
+    assert "Authorization: Bearer" in text
+
+
+def test_llms_txt_without_token_says_access_is_local(indexed_repo):
+    conn, root = indexed_repo
+    httpd = create_server(conn, str(root), token=None)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _, _, body = _get(httpd.base_url + "/llms.txt")
+        assert "No token is configured" in body.decode()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_llms_txt_follows_llmstxt_format_and_documents_every_route(server):
+    _, _, body = _get(server.base_url + "/llms.txt")
+    lines = body.decode().splitlines()
+    assert lines[0].startswith("# ")                       # H1 title first
+    assert lines[2].startswith("> ")                       # blockquote summary
+    assert [l for l in lines if l.startswith("## ")]       # H2 sections
+    text = "\n".join(lines)
+    for route in ("/v1/status", "/v1/queue", "/v1/search", "/v1/context",
+                  "/v1/references"):
+        assert route in text
+
+
+def test_llms_txt_is_packaged():
+    from importlib import resources
+
+    assert (resources.files("indexedcode") / "web" / "llms.txt").is_file()
+
+
+def test_llms_txt_rejects_foreign_host_without_token(indexed_repo):
+    conn, root = indexed_repo
+    httpd = create_server(conn, str(root), token=None)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            _get(httpd.base_url + "/llms.txt", {"Host": "evil.example"})
+        assert excinfo.value.code == 403
+    finally:
+        httpd.shutdown()
+        httpd.server_close()

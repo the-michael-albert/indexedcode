@@ -67,6 +67,14 @@ The core command defaults remain `--root .` and `--db index.sqlite`, relative to
 
 HTTP has no authentication by default; keep it local. `--http-token` enables bearer authentication, but command-line secrets may be visible to local process inspection. Do not expose the service publicly. See [service-manager examples](docs/ops/service-units.md) for launchd and systemd.
 
+## Web dashboard and `llms.txt`
+
+While `indexedcode setup` or `orchestrator serve` is running, open **http://127.0.0.1:8765/** (or the port you chose) for a live dashboard: index coverage, the queued jobs with the functions waiting to be re-indexed, when each job was queued and last updated, recently indexed functions, and a search box. It refreshes every two seconds.
+
+`http://127.0.0.1:8765/llms.txt` describes the API for AI agents, with this server's real URL filled in. The page and `llms.txt` contain no index data, so they load without a token; when the server was started with `--http-token`, the dashboard asks for it and keeps it only in that browser tab. Without a token, the server only answers requests whose `Host` is a loopback name, which blocks DNS-rebinding pages from reading your source.
+
+`GET /v1/queue` returns the same queue data as JSON.
+
 ## One-shot indexing and queries
 
 Use the same absolute root and external database paths for every command. For one-shot use, stop the watcher first: only one writer may own a database. Run `index once` or `orchestrator serve` before querying a new database. Replace the example symbols and repository-relative context path with real ones:

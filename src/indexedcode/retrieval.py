@@ -495,6 +495,93 @@ def get_status(conn, root):
     }
 
 
+def get_queue(conn, *, now_ms, limit=100, functions_per_job=25,
+              recent_limit=20):
+    """Unfinished jobs, the functions they will re-extract, and update times.
+
+    Jobs are queued per file, so a job's ``functions`` are those currently
+    indexed in that file (empty for a file not yet indexed). Timestamps are
+    the store's ``updated_at_ms`` values; ``now_ms`` lets clients compute ages
+    without trusting their own clock.
+    """
+    limit = max(1, min(limit, 500))
+    unfinished = "status IN ('pending', 'running', 'retry', 'failed')"
+    total = conn.execute(
+        f"SELECT COUNT(*) AS c FROM jobs WHERE {unfinished}"
+    ).fetchone()["c"]
+    jobs = []
+    for row in conn.execute(
+        f"SELECT id, command, folder, file, status, attempt_count,"
+        f" available_at_ms, created_at_ms, updated_at_ms, last_error"
+        f" FROM jobs WHERE {unfinished}"
+        f" ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'pending' THEN 1"
+        f" WHEN 'retry' THEN 2 ELSE 3 END, available_at_ms, id LIMIT ?",
+        (limit,),
+    ).fetchall():
+        functions, function_count = [], 0
+        if row["file"] is not None:
+            function_count = conn.execute(
+                "SELECT COUNT(*) AS c FROM functions f JOIN files fl"
+                " ON f.file_id = fl.id WHERE fl.folder = ? AND fl.file = ?",
+                (row["folder"], row["file"]),
+            ).fetchone()["c"]
+            functions = [
+                {"qualified_name": f["qualified_name"],
+                 "start_line": f["start_line"]}
+                for f in conn.execute(
+                    "SELECT f.qualified_name, f.start_line FROM functions f"
+                    " JOIN files fl ON f.file_id = fl.id"
+                    " WHERE fl.folder = ? AND fl.file = ?"
+                    " ORDER BY f.start_line LIMIT ?",
+                    (row["folder"], row["file"], functions_per_job),
+                )
+            ]
+        jobs.append({
+            "id": row["id"],
+            "command": row["command"],
+            "path": (f"{row['folder']}/{row['file']}"
+                     if row["folder"] and row["file"] else row["file"]),
+            "status": row["status"],
+            "attempts": row["attempt_count"],
+            "available_at_ms": row["available_at_ms"],
+            "queued_at_ms": row["created_at_ms"],
+            "updated_at_ms": row["updated_at_ms"],
+            "last_error": row["last_error"],
+            "function_count": function_count,
+            "functions": functions,
+        })
+
+    recent = [
+        {
+            "qualified_name": f["qualified_name"],
+            "path": (f"{f['folder']}/{f['file']}" if f["folder"]
+                     else f["file"]),
+            "start_line": f["start_line"],
+            "updated_at_ms": f["updated_at_ms"],
+        }
+        for f in conn.execute(
+            "SELECT f.qualified_name, f.start_line, f.updated_at_ms,"
+            " fl.folder, fl.file FROM functions f JOIN files fl"
+            " ON f.file_id = fl.id ORDER BY f.updated_at_ms DESC, f.id DESC"
+            " LIMIT ?",
+            (max(1, min(recent_limit, 100)),),
+        )
+    ]
+    last_updated = conn.execute(
+        "SELECT MAX(t) AS m FROM (SELECT MAX(updated_at_ms) AS t FROM files"
+        " WHERE status = 'ready' UNION ALL SELECT MAX(updated_at_ms)"
+        " FROM functions)"
+    ).fetchone()["m"]
+    return {
+        "now_ms": now_ms,
+        "last_updated_ms": last_updated,
+        "total": total,
+        "truncated": total > limit,
+        "jobs": jobs,
+        "recent_functions": recent,
+    }
+
+
 # --- helpers -------------------------------------------------------------------
 
 

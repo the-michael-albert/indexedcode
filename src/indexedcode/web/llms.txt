@@ -1,0 +1,31 @@
+# IndexedCode
+
+> A local index of one source repository, kept current while files change. It extracts modules, classes, functions, and call/import/inheritance relationships with Tree-sitter, and answers symbol and text queries over HTTP. Results are bounded JSON; source text is read from the index or from disk and marked `current` or `stale`.
+
+This server indexes a single repository and listens on {base}. {auth}
+
+Prefer these endpoints over reading the whole tree: search first, then fetch only the source you need. Responses are capped in size; when `truncated` is true, pass `next_cursor` back to get the next page. A cursor becomes invalid (HTTP 400) if the index changed since it was issued — repeat the original query.
+
+## HTTP API
+
+- [GET {base}/v1/status]({base}/v1/status): Index health — `coverage` (ready/known files, entity count), `pending_jobs`, `stale_paths` (files changed on disk since indexing), `failures`, `model_fingerprint`. Check this first if results look wrong or old.
+- [GET {base}/v1/queue]({base}/v1/queue): Work not yet reflected in the index. `jobs[]` each give `path`, `status` (`pending`, `running`, `retry`, `failed`), `queued_at_ms`, `updated_at_ms`, `attempts`, `last_error`, and the `functions` currently indexed in that file that will be re-extracted. Also `last_updated_ms` (when the index last changed), `recent_functions`, and `now_ms` (server clock for computing ages). Results for queued paths may be out of date.
+- [POST {base}/v1/search]({base}/v1/search): Body `{"query": str, "mode": "symbol"|"lexical"|"hybrid", "limit": int, "cursor": str}`. Use `symbol` for an exact function or class name, `lexical` for text inside code. `hybrid` is the default and falls back to lexical when no embedding model is available (`degraded: "semantic_unavailable"`); `semantic` mode errors without a model. Each result has `entity_type`, `entity_id`, `qualified_name`, `path`, `start_line`, `end_line`, `score`, `evidence`.
+- [POST {base}/v1/context]({base}/v1/context): Exact source. Body is either `{"entity_type": "function"|"class", "entity_id": int}` using ids from search, or `{"path": "relative/file.py", "start_line": int, "end_line": int}`. Returns `source`, `freshness` (`current`, `stale`, `unindexed`), and for functions the enclosing class and related edges. Paths must be relative to the repository root.
+- [POST {base}/v1/references]({base}/v1/references): Body `{"symbol": str, "limit": int}`. Syntactic candidates for imports, calls, inheritance, and usages, each with a `snippet`, `line_number`, and `resolution` (`resolved`, `syntactic_candidate`, `unresolved`). These are name matches, not type-checked resolutions — confirm in the source.
+
+## Interfaces
+
+- [Web dashboard]({base}/): Live view of the queue, queued functions, update times, and search, for people.
+- MCP (stdio): `indexedcode-mcp --root <repo> --db <index.sqlite>` exposes `code_search`, `code_context`, `code_references`, `code_status` with the same behavior as the endpoints above.
+
+## Notes
+
+- Read-only: nothing here modifies the repository or runs code.
+- Only supported languages are indexed (Python, JavaScript, TypeScript, Go, Rust, Java, C, C++). Binary, oversized, ignored (`.gitignore`, `node_modules`, `build`, ...) and symlinked files are skipped.
+- Line numbers are 1-based. Times are Unix milliseconds.
+- Full documentation: https://github.com/the-michael-albert/indexedcode#readme
+
+## Optional
+
+- [Release notes and downloads](https://github.com/the-michael-albert/indexedcode/releases)

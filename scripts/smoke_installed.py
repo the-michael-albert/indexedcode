@@ -62,8 +62,15 @@ def main():
                     assert selector.select(60), "HTTP startup timed out"
                     line = proc.stderr.readline().strip()
                 assert line.startswith("listening http://"), line
-                with urllib.request.urlopen(line.split()[1] + "/v1/status", timeout=10) as response:
+                base = line.split()[1]
+                with urllib.request.urlopen(base + "/v1/status", timeout=10) as response:
                     assert json.load(response)["coverage"]["ready_files"] == 1
+                with urllib.request.urlopen(base + "/v1/queue", timeout=10) as response:
+                    assert json.load(response)["total"] == 0
+                with urllib.request.urlopen(base + "/", timeout=10) as response:
+                    assert b"IndexedCode" in response.read()
+                with urllib.request.urlopen(base + "/llms.txt", timeout=10) as response:
+                    assert f"{base}/v1/search".encode() in response.read()
             finally:
                 proc.terminate()
                 try:

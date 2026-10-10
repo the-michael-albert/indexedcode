@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IndexedCode</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --text: #1b1f24; --muted: #667085;
+    --line: #e4e7ec; --accent: #3b5bdb; --ok: #2f9e44; --warn: #e8890c;
+    --bad: #d6336c; --code: #f1f3f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216; --panel: #171b21; --text: #e6e9ee; --muted: #8b95a5;
+      --line: #262c35; --accent: #7c97ff; --ok: #51cf66; --warn: #ffa94d;
+      --bad: #f06595; --code: #0c0f13;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 14px 24px; background: var(--panel);
+    border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; }
+  h1 { font-size: 17px; margin: 0; letter-spacing: .2px; }
+  .spacer { flex: 1; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px;
+    border-radius: 999px; border: 1px solid var(--line); font-size: 12px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .pill.ok .dot { background: var(--ok); }
+  .pill.busy .dot { background: var(--warn); animation: pulse 1.2s infinite; }
+  .pill.bad .dot { background: var(--bad); }
+  @keyframes pulse { 50% { opacity: .3; } }
+  main { max-width: 1100px; margin: 0 auto; padding: 20px 24px 60px; }
+  .cards { display: grid; gap: 12px;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px 14px; }
+  .card .n { font-size: 24px; font-weight: 600; }
+  .card .l { color: var(--muted); font-size: 12px; }
+  section { margin-top: 26px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .8px;
+    color: var(--muted); margin: 0 0 8px; display: flex; gap: 8px;
+    align-items: baseline; }
+  h2 .count { color: var(--text); }
+  .panel { background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; overflow: hidden; }
+  .row { padding: 9px 14px; border-top: 1px solid var(--line); }
+  .row:first-child { border-top: 0; }
+  .row .top { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12.5px; word-break: break-all; }
+  .meta { color: var(--muted); font-size: 12px; }
+  .badge { font-size: 11px; padding: 1px 7px; border-radius: 6px;
+    border: 1px solid var(--line); text-transform: uppercase; letter-spacing: .4px; }
+  .badge.running { color: var(--accent); border-color: var(--accent); }
+  .badge.pending { color: var(--warn); border-color: var(--warn); }
+  .badge.retry { color: var(--warn); border-color: var(--warn); }
+  .badge.failed { color: var(--bad); border-color: var(--bad); }
+  .fns { margin: 6px 0 0; display: flex; gap: 6px; flex-wrap: wrap; }
+  .fn { font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+    background: var(--code); border-radius: 5px; padding: 1px 7px; }
+  .err { color: var(--bad); font-size: 12px; margin-top: 4px;
+    font-family: ui-monospace, Menlo, monospace; word-break: break-word; }
+  .empty { padding: 18px 14px; color: var(--muted); }
+  form { display: flex; gap: 8px; margin-bottom: 10px; }
+  input, select, button { font: inherit; color: var(--text);
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 10px; }
+  input[type=search], input[type=password] { flex: 1; min-width: 0; }
+  button { cursor: pointer; background: var(--accent); color: #fff;
+    border-color: var(--accent); }
+  button.link { background: none; color: var(--accent); border: 0; padding: 0; }
+  pre { margin: 8px 0 0; padding: 10px 12px; background: var(--code);
+    border-radius: 8px; overflow: auto; max-height: 340px; font-size: 12px;
+    line-height: 1.5; }
+  .hit { cursor: pointer; }
+  .hit:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+  dialog { border: 1px solid var(--line); border-radius: 12px; padding: 18px;
+    background: var(--panel); color: var(--text); width: min(420px, 92vw); }
+  dialog::backdrop { background: rgba(0,0,0,.45); }
+  .note { color: var(--muted); font-size: 12px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>IndexedCode</h1>
+  <span class="pill" id="state"><span class="dot"></span><span id="state-text">connecting…</span></span>
+  <span class="spacer"></span>
+  <span class="meta" id="updated" title=""></span>
+</header>
+<main>
+  <div class="cards" id="cards"></div>
+
+  <section>
+    <h2>Queued <span class="count" id="queue-count"></span></h2>
+    <div class="panel" id="queue"></div>
+  </section>
+
+  <section>
+    <h2>Recently indexed functions</h2>
+    <div class="panel" id="recent"></div>
+  </section>
+
+  <section>
+    <h2>Search</h2>
+    <form id="search-form">
+      <input type="search" id="q" placeholder="symbol or text, e.g. parse_config" autocomplete="off">
+      <select id="mode">
+        <option value="hybrid">hybrid</option>
+        <option value="symbol">symbol</option>
+        <option value="lexical">lexical</option>
+      </select>
+      <button type="submit">Search</button>
+    </form>
+    <div class="panel" id="results"><div class="empty">Enter a query to search the index.</div></div>
+  </section>
+</main>
+
+<dialog id="auth">
+  <form method="dialog" id="auth-form" style="display:block">
+    <strong>Access token required</strong>
+    <p class="note">This server was started with <code>--http-token</code>. The token is kept only in this tab.</p>
+    <p><input type="password" id="token" placeholder="token" autocomplete="off" style="width:100%"></p>
+    <button type="submit">Connect</button>
+  </form>
+</dialog>
+
+<script>
+"use strict";
+const POLL_MS = 2000;
+let token = sessionStorage.getItem("indexedcode-token") || "";
+let serverSkewMs = 0;   // server clock minus browser clock
+let lastOk = 0;
+
+function el(tag, props, ...kids) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (k === "class") node.className = v; else node[k] = v;
+  }
+  for (const kid of kids) if (kid != null) node.append(kid);
+  return node;
+}
+
+async function call(path, body) {
+  const headers = {};
+  if (token) headers.Authorization = "Bearer " + token;
+  const init = { headers };
+  if (body !== undefined) {
+    init.method = "POST";
+    init.headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(body);
+  }
+  const res = await fetch(path, init);
+  if (res.status === 401) { askToken(); throw new Error("unauthorized"); }
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+  return data;
+}
+
+function askToken() {
+  const dlg = document.getElementById("auth");
+  if (!dlg.open) dlg.showModal();
+}
+document.getElementById("auth-form").addEventListener("submit", () => {
+  token = document.getElementById("token").value.trim();
+  sessionStorage.setItem("indexedcode-token", token);
+  refresh();
+});
+
+function ago(ms, nowMs) {
+  if (ms == null) return "never";
+  const s = Math.max(0, Math.round((nowMs - ms) / 1000));
+  if (s < 5) return "just now";
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+}
+const clock = ms => new Date(ms).toLocaleTimeString();
+const stamp = ms => new Date(ms).toLocaleString();
+
+function renderCards(status, queue) {
+  const failed = status.failures.failed_jobs + status.failures.error_files;
+  const items = [
+    [status.coverage.ready_files + " / " + status.coverage.known_files, "files indexed"],
+    [status.coverage.indexed_entities, "searchable entities"],
+    [queue.total, "queued jobs"],
+    [status.stale_paths.length, "stale paths"],
+    [failed, "failures"],
+  ];
+  document.getElementById("cards").replaceChildren(...items.map(([n, l]) =>
+    el("div", { class: "card" }, el("div", { class: "n", textContent: String(n) }),
+       el("div", { class: "l", textContent: l }))));
+}
+
+function renderQueue(queue, nowMs) {
+  document.getElementById("queue-count").textContent = queue.total ? "(" + queue.total + ")" : "";
+  const box = document.getElementById("queue");
+  if (!queue.jobs.length) {
+    box.replaceChildren(el("div", { class: "empty", textContent: "Nothing queued — the index is up to date." }));
+    return;
+  }
+  box.replaceChildren(...queue.jobs.map(job => {
+    const top = el("div", { class: "top" },
+      el("span", { class: "badge " + job.status, textContent: job.status }),
+      el("span", { class: "path", textContent: job.path || job.command }),
+      el("span", { class: "meta", textContent: job.command.replace("_", " ") }),
+      el("span", { class: "spacer" }),
+      el("span", { class: "meta", title: stamp(job.queued_at_ms),
+        textContent: "queued " + ago(job.queued_at_ms, nowMs) }),
+      el("span", { class: "meta", title: stamp(job.updated_at_ms),
+        textContent: "updated " + ago(job.updated_at_ms, nowMs) }));
+    const row = el("div", { class: "row" }, top);
+    if (job.function_count) {
+      const shown = job.functions.map(f => el("span", { class: "fn",
+        title: "line " + f.start_line, textContent: f.qualified_name }));
+      if (job.function_count > shown.length)
+        shown.push(el("span", { class: "meta", textContent: "+" + (job.function_count - shown.length) + " more" }));
+      row.append(el("div", { class: "fns" }, ...shown));
+    } else if (job.command === "refresh_file" && job.status !== "failed") {
+      row.append(el("div", { class: "meta", textContent: "Not yet indexed — functions appear once processed." }));
+    }
+    if (job.attempts) row.append(el("div", { class: "meta", textContent: "attempt " + job.attempts }));
+    if (job.last_error) row.append(el("div", { class: "err", textContent: job.last_error }));
+    return row;
+  }));
+  if (queue.truncated)
+    box.append(el("div", { class: "row meta", textContent: "Showing the first " + queue.jobs.length + " jobs." }));
+}
+
+function renderRecent(queue, nowMs) {
+  const box = document.getElementById("recent");
+  if (!queue.recent_functions.length) {
+    box.replaceChildren(el("div", { class: "empty", textContent: "No functions indexed yet." }));
+    return;
+  }
+  box.replaceChildren(...queue.recent_functions.map(f =>
+    el("div", { class: "row" }, el("div", { class: "top" },
+      el("span", { class: "fn", textContent: f.qualified_name }),
+      el("span", { class: "path", textContent: f.path + ":" + f.start_line }),
+      el("span", { class: "spacer" }),
+      el("span", { class: "meta", title: stamp(f.updated_at_ms),
+        textContent: ago(f.updated_at_ms, nowMs) })))));
+}
+
+function setState(kind, text) {
+  document.getElementById("state").className = "pill " + kind;
+  document.getElementById("state-text").textContent = text;
+}
+
+async function refresh() {
+  try {
+    const [status, queue] = await Promise.all([call("/v1/status"), call("/v1/queue")]);
+    serverSkewMs = queue.now_ms - Date.now();
+    const nowMs = queue.now_ms;
+    lastOk = Date.now();
+    renderCards(status, queue);
+    renderQueue(queue, nowMs);
+    renderRecent(queue, nowMs);
+    const failed = status.failures.failed_jobs + status.failures.error_files;
+    if (failed) setState("bad", failed + " failure" + (failed > 1 ? "s" : ""));
+    else if (queue.total) setState("busy", "indexing " + queue.total + " queued");
+    else setState("ok", "up to date");
+    const u = document.getElementById("updated");
+    u.textContent = queue.last_updated_ms == null ? "nothing indexed yet"
+      : "index updated " + ago(queue.last_updated_ms, nowMs) + " · " + clock(queue.last_updated_ms);
+    u.title = queue.last_updated_ms == null ? "" : stamp(queue.last_updated_ms);
+  } catch (err) {
+    if (err.message !== "unauthorized") setState("bad", "server unreachable");
+  }
+}
+
+document.getElementById("search-form").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  const q = document.getElementById("q").value.trim();
+  if (!q) return;
+  const box = document.getElementById("results");
+  try {
+    const data = await call("/v1/search", { query: q, mode: document.getElementById("mode").value, limit: 10 });
+    if (!data.results.length) {
+      box.replaceChildren(el("div", { class: "empty", textContent: "No matches." }));
+      return;
+    }
+    const rows = data.results.map(r => {
+      const row = el("div", { class: "row hit" }, el("div", { class: "top" },
+        el("span", { class: "badge", textContent: r.entity_type }),
+        el("span", { class: "fn", textContent: r.qualified_name || r.name || "" }),
+        el("span", { class: "path", textContent: r.path ? r.path + ":" + r.start_line : "" })));
+      if (r.evidence) row.append(el("div", { class: "meta", textContent: r.evidence }));
+      row.addEventListener("click", () => showSource(row, r));
+      return row;
+    });
+    if (data.degraded) rows.unshift(el("div", { class: "row meta",
+      textContent: "No embedding model available — using symbol/lexical matching." }));
+    box.replaceChildren(...rows);
+  } catch (err) {
+    box.replaceChildren(el("div", { class: "empty", textContent: err.message }));
+  }
+});
+
+async function showSource(row, hit) {
+  const open = row.querySelector("pre");
+  if (open) { open.remove(); return; }
+  if (hit.entity_type !== "function" && hit.entity_type !== "class") return;
+  try {
+    const ctx = await call("/v1/context", { entity_type: hit.entity_type, entity_id: hit.entity_id });
+    row.append(el("pre", { textContent: ctx.source }),
+      el("div", { class: "meta", textContent: ctx.path + " · " + ctx.freshness }));
+  } catch (err) {
+    row.append(el("div", { class: "err", textContent: err.message }));
+  }
+}
+
+// keep "x ago" labels honest between polls if the server stalls
+setInterval(() => {
+  if (lastOk && Date.now() - lastOk > 3 * POLL_MS) setState("bad", "server unreachable");
+}, POLL_MS);
+refresh();
+setInterval(refresh, POLL_MS);
+</script>
+</body>
+</html>
