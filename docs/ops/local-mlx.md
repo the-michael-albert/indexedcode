@@ -1,57 +1,26 @@
-# Local deployment: managed MLX (Apple Silicon)
+# Local macOS deployment and MLX integration boundary
 
-All-in-one local profile: the orchestrator supervises both inference
-workers on the same machine.
+## Supported today: the core CLI
 
-## Configuration (`indexedcode.toml`)
+The released CLI runs on macOS with Python 3.11 or newer. It indexes source and serves symbol/lexical retrieval without a GPU, MLX, model downloads, or inference dependencies. Install a release using the [README instructions](../../README.md).
 
-```toml
-[embedding]
-mode = "managed"
-backend = "mlx"
-model = "sentence-transformers/all-MiniLM-L6-v2"
-
-[summarization]
-mode = "managed"
-backend = "mlx"
-model = "Qwen/Qwen2.5-Coder-0.5B-Instruct"
-
-[memory]
-managed_soft_limit_mb = 2300
-managed_hard_limit_mb = 2560
-```
-
-## Run
+Use absolute paths and keep the database outside the watched repository:
 
 ```bash
-indexedcode orchestrator serve \
-  --root /path/to/repo \
-  --db /path/to/index.sqlite \
-  --http-port 8765
+ROOT="/Users/you/work/myrepo"
+DB="/Users/you/.local/share/indexedcode/myrepo/index.sqlite"
+mkdir -p "$(dirname "$DB")"
+indexedcode orchestrator serve --root "$ROOT" --db "$DB" --http-port 8765
 ```
 
-The orchestrator verifies Apple Silicon (`darwin`/`arm64`) before
-spawning MLX workers, refuses startup otherwise, and never falls back to
-CPU. Workers bind only to loopback ports with per-run bearer secrets
-passed via environment — never in argv.
+This starts the indexer, watcher, and loopback retrieval API. It does **not** start MLX workers. Stop it with Ctrl-C or SIGTERM. See [service-manager examples](service-units.md) for launchd.
 
-## Memory profile
+The CLI does not load TOML configuration. Creating an `indexedcode.toml` file or setting a managed MLX backend in one has no effect on this command. Default hybrid search reports `semantic_unavailable` and uses symbol/lexical retrieval; explicit semantic search is unavailable.
 
-The managed-local target is **approximately 1–2.5 GB total process
-memory** under the documented default workload (quantized Qwen, a
-compact 384-dimension embedder, 4,096 input / 256 output tokens, one
-active request per worker, WAL-mode SQLite with a 32 MiB cache). This is
-a measured profile, not a guarantee: exceeding it (FP16 weights, larger
-contexts, concurrency > 1) requires `allow_over_budget = true` or
-remote inference. At the soft limit new inference is deferred; at the
-hard limit it is rejected and `memory_pressure` is reported — a worker
-is never killed from the admission check alone. Measure your deployment
-with `indexedcode status` RSS reporting and the benchmark harness
-(`python -m indexedcode.bench` via `run_benchmarks`).
+## Experimental components, not a deployment recipe
 
-## Model pinning
+The source tree contains MLX worker and supervision components for future integration. Their presence does not mean the installed CLI supervises inference, performs model-readiness checks, or enforces an inference memory budget.
 
-Pin model revisions in configuration. The orchestrator validates each
-worker's model fingerprint at readiness and on every response; a changed
-embedding fingerprint requires a rebuild into a fresh database (see
-[backup-rebuild-rollback.md](backup-rebuild-rollback.md)).
+There is no supported end-to-end managed MLX deployment in this release. Do not install GPU dependencies or configure models to follow the core quick start. Real-hardware behavior and memory usage require separate validation; the earlier 1–2.5 GB inference memory target is not a measured guarantee for the shipped CLI.
+
+Before an inference deployment can be documented as supported, it needs explicit configuration loading, worker-to-pipeline and retrieval wiring, compatible model/revision handling, lifecycle and failure testing, and hardware validation. None of those are enabled by the core CLI installation instructions.

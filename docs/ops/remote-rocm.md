@@ -1,50 +1,24 @@
-# Remote deployment: ROCm inference host (AMD/Linux)
+# Linux deployment and remote ROCm integration boundary
 
-Cross-machine inference: the orchestrator never spawns workers on
-another host. The remote host runs its own workers under its own process
-manager; the local orchestrator only holds an authenticated HTTPS
-client.
+## Supported today: the core CLI
 
-## Remote host (Linux + HIP)
+The released CLI runs on Linux with Python 3.11 or newer. Core indexing, symbol/lexical search, context, and reference retrieval require no AMD GPU, HIP runtime, ROCm, or inference dependencies. Install a GitHub release using the [README instructions](../../README.md).
 
-Verify the ROCm runtime before configuring:
+For a Linux host, use absolute paths and keep the database outside the repository:
 
 ```bash
-command -v rocm-smi   # or hipcc; the orchestrator refuses CPU fallback
+ROOT="/home/you/work/myrepo"
+DB="/home/you/.local/share/indexedcode/myrepo/index.sqlite"
+mkdir -p "$(dirname "$DB")"
+indexedcode orchestrator serve --root "$ROOT" --db "$DB" --http-port 8765
 ```
 
-Run the worker entrypoints (no repository database, no watcher):
+This starts the local indexer, watcher, and loopback HTTP retrieval API, not remote inference. See [service-manager examples](service-units.md) for a core systemd service.
 
-```bash
-indexedcode orchestrator serve ...   # not used here; use worker commands:
-python -m indexedcode.workers.serve --role embed --backend rocm \
-  --model sentence-transformers/all-MiniLM-L6-v2 \
-  --port 8901
-python -m indexedcode.workers.serve --role summary --backend rocm \
-  --model Qwen/Qwen2.5-Coder-0.5B-Instruct \
-  --port 8902
-```
+## Remote inference is not integrated
 
-Expose them only through a TLS-terminating reverse proxy or private
-tunnel with bearer authentication. `http://` remote URLs are rejected at
-configuration load — encrypted transport is mandatory because the
-bearer token and repository source cross the network.
+Worker and authenticated client components exist in the source tree, but the packaged CLI does **not** load TOML configuration, start ROCm workers, or connect remote workers to indexing or search. Setting `mode = "remote"` in an `indexedcode.toml` file does not change CLI behavior. Default hybrid search reports `semantic_unavailable` and falls back to symbol/lexical retrieval. Explicit semantic search is unavailable.
 
-## Local orchestrator
+There is no supported remote ROCm deployment recipe or mixed MLX/ROCm CLI profile in this release. Manually starting a worker does not enable an end-to-end inference path. The core release CI does not validate GPU runtime compatibility, model readiness, remote fingerprints, or inference memory usage.
 
-```toml
-[embedding]
-mode = "remote"
-backend = "rocm"
-remote_url = "https://amd-index-worker.internal"
-remote_token = "<secret from your secret store>"
-
-[summarization]
-mode = "managed"   # mixed deployments are supported
-backend = "mlx"
-```
-
-Remote sections are exempt from the managed-local memory budget gate:
-over-budget settings there need no `allow_over_budget` opt-in. Fingerprint
-mismatches are fatal at first use — pin revisions and rebuild when they
-change.
+Any future cross-machine integration must separately validate ROCm hardware support, model compatibility, configuration loading, pipeline/retrieval wiring, authentication, encrypted transport, and failure handling. Source text and credentials crossing a network require protection: the configuration loader already rejects any `remote_url` that is not `https://`, and workers must stay behind bearer authentication and a TLS-terminating proxy or private tunnel. Do not expose experimental worker ports publicly. A remote host would need to manage its own worker lifecycle rather than expect the local CLI to launch processes on another machine.
