@@ -6,9 +6,13 @@ directory. Nothing at the database boundary is mocked.
 
 from __future__ import annotations
 
+import os
+import socket
 import sqlite3
 import struct
+import time
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -88,3 +92,42 @@ def new_lease_token():
 
 def sqlite_version(conn: sqlite3.Connection):
     return conn.execute("SELECT sqlite_version()").fetchone()[0]
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: fake-worker helpers (test-only infrastructure)
+# ---------------------------------------------------------------------------
+
+FAKE_WORKER = str(Path(__file__).parent / "fake_worker.py")
+FAKE_FINGERPRINT = "sha256:fake-fingerprint"
+
+
+def free_port():
+    """Reserve and release an ephemeral loopback TCP port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def pid_alive(pid):
+    """True if the process still exists (ignores zombie reaping state)."""
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def wait_until(predicate, timeout=10.0, interval=0.05):
+    """Poll predicate until it is truthy or timeout elapses; return value."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = predicate()
+        if result:
+            return result
+        time.sleep(interval)
+    return None
