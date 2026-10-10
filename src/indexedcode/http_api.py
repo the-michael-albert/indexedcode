@@ -8,9 +8,10 @@ Requests are capped and responses bounded with explicit truncation.
 from __future__ import annotations
 
 import json
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 
 from indexedcode import retrieval
+from indexedcode.httpserver import LoopbackHTTPServer
 
 MAX_REQUEST_BYTES = 32_768
 MAX_RESPONSE_CHARS = retrieval.MAX_CHARS_CAP
@@ -102,6 +103,6 @@ def create_server(conn, root, token=None, host="127.0.0.1", port=0,
         def do_POST(self):
             self._dispatch("POST")
 
-    server = ThreadingHTTPServer((host, port), Handler)
+    server = LoopbackHTTPServer((host, port), Handler)
     server.base_url = f"http://{host}:{server.server_address[1]}"
     return server

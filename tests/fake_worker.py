@@ -24,11 +24,13 @@ import signal
 import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 # this script runs as a bare child process without pytest's pythonpath
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from indexedcode.httpserver import LoopbackHTTPServer  # noqa: E402
 
 
 def build_handler(secret, fingerprint, embed_status):
@@ -119,7 +121,7 @@ def main():
         time.sleep(3600)
         return
 
-    server = ThreadingHTTPServer(("127.0.0.1", port), build_handler(
+    server = LoopbackHTTPServer(("127.0.0.1", port), build_handler(
         secret, fingerprint, embed_status))
     if args.mode == "ignore_sigterm":
         signal.signal(signal.SIGTERM, signal.SIG_IGN)

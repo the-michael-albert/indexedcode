@@ -12,8 +12,9 @@ import argparse
 import json
 import os
 import sys
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 
+from indexedcode.httpserver import LoopbackHTTPServer
 from indexedcode.workers import hardwares
 from indexedcode.workers.adapters import backend_available
 from indexedcode.workers.fingerprint import model_fingerprint
@@ -114,7 +115,7 @@ def main(argv=None) -> int:
                     normalized=True)
     info["fingerprint"] = model_fingerprint(**info)
 
-    server = ThreadingHTTPServer(
+    server = LoopbackHTTPServer(
         ("127.0.0.1", args.port),
         build_handler(secret, info, summary_fn, embed_fn),
     )
