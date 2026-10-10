@@ -55,13 +55,17 @@ def main():
                 text=True,
             )
             try:
-                # Bound waiting for the startup line without blocking indefinitely.
-                import selectors
+                # Log lines precede the "listening" line; bound the wait so a
+                # hung server fails the check instead of blocking forever.
+                import selectors, time
+                line, deadline = "", time.monotonic() + 60
                 with selectors.DefaultSelector() as selector:
                     selector.register(proc.stderr, selectors.EVENT_READ)
-                    assert selector.select(60), "HTTP startup timed out"
-                    line = proc.stderr.readline().strip()
-                assert line.startswith("listening http://"), line
+                    while not line.startswith("listening http://"):
+                        remaining = deadline - time.monotonic()
+                        assert remaining > 0 and selector.select(remaining), (
+                            f"HTTP startup timed out; last line: {line!r}")
+                        line = proc.stderr.readline().strip()
                 base = line.split()[1]
                 with urllib.request.urlopen(base + "/v1/status", timeout=10) as response:
                     assert json.load(response)["coverage"]["ready_files"] == 1
