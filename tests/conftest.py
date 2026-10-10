@@ -12,12 +12,12 @@ import uuid
 
 import pytest
 
-from indexedcode.db import connect, initialize
-
 
 @pytest.fixture()
 def db(tmp_path):
     """An initialized writer connection to a fresh database file."""
+    from indexedcode.db import connect, initialize
+
     path = tmp_path / "index.sqlite"
     conn = connect(path, writer=True)
     initialize(conn)
