@@ -175,3 +175,80 @@ class FakeSummarizer:
             raise self.error
         self.calls.append(list(texts))
         return [f"summary of {t[:24]}" for t in texts]
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: a small indexed repository shared by retrieval/adapter tests
+# ---------------------------------------------------------------------------
+
+REPO_SOURCES = {
+    "src/config_loader.py": (
+        "import json\n"
+        "\n"
+        "\n"
+        "def parse_config(text):\n"
+        "    return json.loads(text)\n"
+        "\n"
+        "\n"
+        "class Config:\n"
+        "    def load(self, path):\n"
+        "        return parse_config(open(path).read())\n"
+    ),
+    "src/reporting.py": (
+        "def format_report(items):\n"
+        '    return "\\n".join(str(item) for item in items)\n'
+    ),
+    "tests/test_config_loader.py": (
+        "from src.config_loader import parse_config\n"
+        "\n"
+        "\n"
+        "def test_parse_config():\n"
+        "    assert parse_config('{}') == {}\n"
+    ),
+}
+
+
+def write_repo_sources(root):
+    for rel, text in REPO_SOURCES.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+
+def index_repo(conn, root, now_ms=1000):
+    """Reconcile and process every job until idle; returns the embedder."""
+    from indexedcode.pipeline import process_next_job
+    from indexedcode.reconcile import reconcile
+
+    reconcile(conn, str(root), now_ms=now_ms)
+    embed = FakeEmbedder()
+    now = now_ms
+    for _ in range(200):
+        outcome = process_next_job(
+            conn, str(root), embed=embed, summarize=FakeSummarizer(),
+            now_ms=now, retry_base_ms=1, retry_cap_ms=1, jitter=lambda: 0,
+        )
+        if outcome is None:
+            next_due = conn.execute(
+                "SELECT MIN(available_at_ms) AS next FROM jobs"
+                " WHERE status IN ('pending', 'retry')"
+            ).fetchone()["next"]
+            if next_due is None:
+                return embed
+            now = max(now + 1, next_due + 1)
+        else:
+            now += 1
+    raise AssertionError("indexing never went idle")
+
+
+@pytest.fixture()
+def indexed_repo(tmp_path):
+    """A fully indexed three-file repository plus its writer connection."""
+    from indexedcode.db import connect, initialize
+
+    write_repo_sources(tmp_path)
+    conn = connect(tmp_path / "index.sqlite", writer=True)
+    initialize(conn)
+    index_repo(conn, tmp_path)
+    yield conn, tmp_path
+    conn.close()
