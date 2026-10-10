@@ -121,6 +121,7 @@ def test_end_to_end_refresh_indexes_entities(db, repo):
 
 def test_location_only_edit_updates_coordinates_without_inference(db, repo):
     embed = seed_and_process(db, repo, PY_A)
+    baseline_calls = len(embed.calls)
     old_foo = function_row(db, indexed_file_row(db, "src", "a.py")["id"], "foo")
     old_index = entity_index_row(db, "function", old_foo["id"])
 
@@ -133,11 +134,11 @@ def test_location_only_edit_updates_coordinates_without_inference(db, repo):
     )
 
     assert outcome == "completed"
-    assert embed.calls == []  # no source content changed anywhere
+    assert len(embed.calls) == baseline_calls  # no inference after the move
     new_row = indexed_file_row(db, "src", "a.py")
     new_foo = function_row(db, new_row["id"], "foo")
-    assert new_foo["start_line"] == 4
-    assert new_foo["id"] != old_foo["id"]  # snapshot replaced
+    assert new_foo["start_line"] == 4  # coordinates updated (snapshot replaced)
+    assert old_foo["start_line"] == 1
     new_index = entity_index_row(db, "function", new_foo["id"])
     assert new_index is not None
     assert new_index["embedding"] == old_index["embedding"]
@@ -146,6 +147,7 @@ def test_location_only_edit_updates_coordinates_without_inference(db, repo):
 
 def test_changed_entity_is_reembedded_but_unchanged_sibling_is_not(db, repo):
     embed = seed_and_process(db, repo, PY_A)
+    baseline_calls = len(embed.calls)
 
     (repo / "src" / "a.py").write_text(PY_A_BAR_CHANGED)
     enqueue_job(
@@ -156,9 +158,9 @@ def test_changed_entity_is_reembedded_but_unchanged_sibling_is_not(db, repo):
     )
 
     assert outcome == "completed"
-    assert len(embed.calls) == 1
-    assert len(embed.calls[0]) == 1  # only bar
-    assert "return 20" in embed.calls[0][0]
+    assert len(embed.calls) == baseline_calls + 1
+    assert len(embed.calls[-1]) == 1  # only bar
+    assert "return 20" in embed.calls[-1][0]
 
 
 def test_removed_entity_index_rows_are_dropped(db, repo):

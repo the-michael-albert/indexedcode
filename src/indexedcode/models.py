@@ -202,6 +202,12 @@ class FunctionDef(RowModel):
     source_hash: str
     class_id: int | None = None
     parent_function_id: int | None = None
+    # qname linkage resolved inside the publication transaction when the
+    # numeric ids are absent (fresh ids are assigned during publication)
+    parent_class_qname: str | None = None
+    parent_function_qname: str | None = None
+    summary: str | None = None
+    summary_input_hash: str | None = None
 
     @model_validator(mode="after")
     def _check_order(self):
@@ -225,6 +231,9 @@ class ClassDef(RowModel):
     source: str
     source_hash: str
     parent_class_id: int | None = None
+    parent_class_qname: str | None = None
+    summary: str | None = None
+    summary_input_hash: str | None = None
 
     @model_validator(mode="after")
     def _check_order(self):
@@ -239,17 +248,22 @@ class RelationshipRecord(RowModel):
     """Input shape for one source-grounded relationship edge."""
 
     source_type: EntityType
-    source_id: int
     relation: Relation
     line_number: int = Field(ge=1)
     resolution: Resolution
     snippet: str
+    source_id: int | None = None
+    source_qname: str | None = None
     target_type: EntityType | None = None
     target_id: int | None = None
     target_name: str | None = None
 
     @model_validator(mode="after")
     def _check_target(self):
+        if (self.source_id is None) == (self.source_qname is None):
+            raise ValueError(
+                "exactly one of source_id or source_qname must be set"
+            )
         if (self.target_id is None) != (self.target_type is None):
             raise ValueError("target_id and target_type must be set together")
         if self.target_id is None and self.target_name is None:

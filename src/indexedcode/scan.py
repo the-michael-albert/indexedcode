@@ -134,8 +134,14 @@ def scan_repository(root, max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
             if size > max_file_bytes:
                 skipped.append(SkippedFile(relative_path=rel_path, reason="oversized"))
                 continue
-            with open(abs_file, "rb") as fh:
-                head = fh.read(BINARY_SNIFF_BYTES)
+            try:
+                with open(abs_file, "rb") as fh:
+                    head = fh.read(BINARY_SNIFF_BYTES)
+            except OSError:
+                # unreadable (e.g. permissions): skip explicitly — a
+                # permission error never means the file was deleted
+                skipped.append(SkippedFile(relative_path=rel_path, reason="unreachable"))
+                continue
             if b"\x00" in head:
                 skipped.append(SkippedFile(relative_path=rel_path, reason="binary"))
                 continue

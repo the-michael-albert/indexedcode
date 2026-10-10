@@ -481,8 +481,8 @@ def _insert_class_row(conn, file_id, cls, now_ms):
     conn.execute(
         "INSERT INTO classes (file_id, parent_class_id, name, qualified_name,"
         " kind, start_line, end_line, start_byte, end_byte, source,"
-        " source_hash, updated_at_ms)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " source_hash, summary, summary_input_hash, updated_at_ms)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             file_id,
             cls["parent_class_id"],
@@ -495,6 +495,8 @@ def _insert_class_row(conn, file_id, cls, now_ms):
             cls["end_byte"],
             cls["source"],
             cls["source_hash"],
+            cls["summary"],
+            cls["summary_input_hash"],
             now_ms,
         ),
     )
@@ -505,8 +507,8 @@ def _insert_function_row(conn, file_id, fn, now_ms):
     conn.execute(
         "INSERT INTO functions (file_id, class_id, parent_function_id, name,"
         " qualified_name, signature, start_line, end_line, start_byte,"
-        " end_byte, source, source_hash, updated_at_ms)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " end_byte, source, source_hash, summary, summary_input_hash,"
+        " updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             file_id,
             fn["class_id"],
@@ -520,14 +522,56 @@ def _insert_function_row(conn, file_id, fn, now_ms):
             fn["end_byte"],
             fn["source"],
             fn["source_hash"],
+            fn["summary"],
+            fn["summary_input_hash"],
             now_ms,
         ),
     )
     return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 
+# --- file/module bootstrap ---------------------------------------------------
+
+
+def ensure_module(conn, folder, now_ms=0):
+    """Find or create the module row for a repository-relative folder."""
+    folder = folder or ""
+    row = conn.execute(
+        "SELECT id FROM modules WHERE relative_path = ?", (folder,)
+    ).fetchone()
+    if row is not None:
+        return row["id"]
+    name = folder.rsplit("/", 1)[-1] if folder else "root"
+    conn.execute(
+        "INSERT INTO modules (name, relative_path, updated_at_ms)"
+        " VALUES (?, ?, ?)",
+        (name, folder, now_ms),
+    )
+    return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def ensure_file_row(conn, folder, file, language, is_test, now_ms):
+    """Find or create the files row for one repository-relative path."""
+    row = conn.execute(
+        "SELECT * FROM files WHERE folder = ? AND file = ?", (folder, file)
+    ).fetchone()
+    if row is not None:
+        return row
+    module_id = ensure_module(conn, folder, now_ms)
+    conn.execute(
+        "INSERT INTO files (module_id, folder, file, language, is_test,"
+        " observed_revision, status, updated_at_ms)"
+        " VALUES (?, ?, ?, ?, ?, 1, 'pending', ?)",
+        (module_id, folder, file, language, int(bool(is_test)), now_ms),
+    )
+    return conn.execute(
+        "SELECT * FROM files WHERE folder = ? AND file = ?", (folder, file)
+    ).fetchone()
+
+
 def publish_file_refresh(conn, job, file_row, classes, functions, relationships,
-                         now_ms, indexed_hash=None):
+                         now_ms, indexed_hash=None, entity_index=None,
+                         queue_duration_ms=0, process_duration_ms=0):
     """Replace a file's snapshot atomically, then complete its job.
 
     Accepts ClassDef/FunctionDef/RelationshipRecord models or the equivalent
@@ -535,6 +579,15 @@ def publish_file_refresh(conn, job, file_row, classes, functions, relationships,
     Either the previous complete snapshot or the next one is visible to
     readers. Metrics are appended best-effort after the commit and can never
     roll back a successful publication.
+
+    Numeric entity linkage may be given either as ids (pre-resolved) or as
+    ``parent_class_qname``/``parent_function_qname``/``source_qname``,
+    resolved against the freshly inserted rows inside this transaction.
+    ``entity_index`` rows likewise reference entities by ``entity_key``
+    (qualified name, or the literal ``"file"``/``"module"``) and are
+    resolved to fresh ids before insertion (plan §7.3 step 4).
+
+    Returns ``{"file_id", "functions": {qname: id}, "classes": {qname: id}}``.
     """
     classes = [c if isinstance(c, ClassDef) else ClassDef.model_validate(c)
                for c in classes]
@@ -548,9 +601,11 @@ def publish_file_refresh(conn, job, file_row, classes, functions, relationships,
     conn.execute("BEGIN IMMEDIATE")
     try:
         file_id = conn.execute(
-            "SELECT id FROM files WHERE folder = ? AND file = ?",
+            "SELECT id, module_id FROM files WHERE folder = ? AND file = ?",
             (file_row["folder"], file_row["file"]),
-        ).fetchone()[0]
+        ).fetchone()
+        module_id = file_id["module_id"]
+        file_id = file_id["id"]
 
         # 1. remove the previous snapshot
         conn.execute(
@@ -560,12 +615,49 @@ def publish_file_refresh(conn, job, file_row, classes, functions, relationships,
         conn.execute("DELETE FROM functions WHERE file_id = ?", (file_id,))
         conn.execute("DELETE FROM classes WHERE file_id = ?", (file_id,))
 
-        # 2-3. insert refreshed entities and relationships
+        # 2-3. insert refreshed entities, resolving qname linkage to the
+        # fresh ids as we go (parents are always emitted before children)
+        class_ids: dict[str, int] = {}
         for cls in classes:
-            _insert_class_row(conn, file_id, cls, now_ms)
+            parent_id = cls.parent_class_id
+            if parent_id is None and cls.parent_class_qname is not None:
+                parent_id = class_ids.get(cls.parent_class_qname)
+            _insert_class_row(
+                conn, file_id,
+                cls.model_copy(update={
+                    "parent_class_id": parent_id,
+                }),
+                now_ms,
+            )
+            class_ids[cls.qualified_name] = (
+                conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            )
+        function_ids: dict[str, int] = {}
         for fn in functions:
-            _insert_function_row(conn, file_id, fn, now_ms)
+            class_id = fn.class_id
+            if class_id is None and fn.parent_class_qname is not None:
+                class_id = class_ids.get(fn.parent_class_qname)
+            parent_fn_id = fn.parent_function_id
+            if (parent_fn_id is None
+                    and fn.parent_function_qname is not None):
+                parent_fn_id = function_ids.get(fn.parent_function_qname)
+            _insert_function_row(
+                conn, file_id,
+                fn.model_copy(update={
+                    "class_id": class_id,
+                    "parent_function_id": parent_fn_id,
+                }),
+                now_ms,
+            )
+            function_ids[fn.qualified_name] = (
+                conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            )
         for rel in relationships:
+            source_id = rel.source_id
+            if source_id is None:
+                source_id = function_ids.get(rel.source_qname)
+                if source_id is None:
+                    source_id = class_ids.get(rel.source_qname)
             conn.execute(
                 "INSERT INTO relationships (source_type, source_id, relation,"
                 " target_type, target_id, target_name, origin_file_id,"
@@ -573,7 +665,7 @@ def publish_file_refresh(conn, job, file_row, classes, functions, relationships,
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     rel["source_type"],
-                    rel["source_id"],
+                    source_id,
                     rel["relation"],
                     rel["target_type"],
                     rel["target_id"],
@@ -582,6 +674,43 @@ def publish_file_refresh(conn, job, file_row, classes, functions, relationships,
                     rel["line_number"],
                     rel["resolution"],
                     rel["snippet"],
+                ),
+            )
+
+        # 4. upsert entity_index rows for this snapshot's entities,
+        # resolving each row's entity_key to a fresh id
+        for row in entity_index or ():
+            entity_type = row["entity_type"]
+            key = row["entity_key"]
+            if entity_type == "function":
+                entity_id = function_ids.get(key)
+            elif entity_type == "class":
+                entity_id = class_ids.get(key)
+            elif entity_type == "file":
+                entity_id = file_id
+            elif entity_type == "module":
+                entity_id = module_id
+            else:  # pragma: no cover - validated below
+                entity_id = None
+            if entity_id is None:
+                raise KeyError(
+                    f"entity_index row references unknown {entity_type}"
+                    f" {key!r}"
+                )
+            validated = EntityIndexInput.model_validate({
+                **row, "entity_id": entity_id,
+            })
+            conn.execute(
+                "INSERT INTO entity_index (entity_type, entity_id,"
+                " search_text, embedding, embedding_dimensions, input_hash,"
+                " model_fingerprint, embedding_truncated, updated_at_ms)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    validated.entity_type, validated.entity_id,
+                    validated.search_text, validated.embedding,
+                    validated.dimensions, validated.input_hash,
+                    validated.model_fingerprint,
+                    int(validated.embedding_truncated), validated.now_ms or now_ms,
                 ),
             )
 
@@ -615,12 +744,18 @@ def publish_file_refresh(conn, job, file_row, classes, functions, relationships,
             now_ms=now_ms,
             job_id=job["id"],
             job_attempt=job["attempt_count"],
-            queue_duration_ms=0,
-            process_duration_ms=0,
+            queue_duration_ms=max(0, queue_duration_ms),
+            process_duration_ms=max(0, process_duration_ms),
             command=job["command"],
         )
     except Exception:
         pass  # bounded internal counter; plan §5.4
+
+    return {
+        "file_id": file_id,
+        "functions": function_ids,
+        "classes": class_ids,
+    }
 
 
 def remove_file(conn, folder, file, now_ms):

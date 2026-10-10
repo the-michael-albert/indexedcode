@@ -42,7 +42,10 @@ def repo(tmp_path):
 def write(repo, rel, text):
     path = repo / rel
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
+    if isinstance(text, bytes):
+        path.write_bytes(text)
+    else:
+        path.write_text(text)
     return path
 
 
