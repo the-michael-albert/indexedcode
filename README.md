@@ -12,7 +12,7 @@ Supported source languages include Python, JavaScript, TypeScript, Go, Rust, Jav
 
 ## Install a release
 
-Wheel and source-distribution assets are published on [GitHub Releases](https://github.com/the-michael-albert/indexedcode/releases), **not PyPI**. Versioned URLs become available only after the corresponding release is published; a 404 before publication is expected. The examples pin version `1.0.0a1`; replace both version components when upgrading. CI tests Linux and macOS on Python 3.11–3.14.
+Wheel and source-distribution assets are published on [GitHub Releases](https://github.com/the-michael-albert/indexedcode/releases), **not PyPI**. Versioned URLs become available only after the corresponding release is published; a 404 before publication is expected. The examples pin version `1.0.0a2`; replace both version components when upgrading. CI tests Linux and macOS on Python 3.11–3.14.
 
 ### uv (recommended)
 
@@ -20,7 +20,7 @@ Wheel and source-distribution assets are published on [GitHub Releases](https://
 
 ```bash
 uv tool install --python 3.12 \
-  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a1/indexedcode-1.0.0a1-py3-none-any.whl
+  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a2/indexedcode-1.0.0a2-py3-none-any.whl
 ```
 
 ### pipx
@@ -29,7 +29,7 @@ With Python 3.11+ and [pipx](https://pipx.pypa.io/stable/installation/) installe
 
 ```bash
 pipx install \
-  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a1/indexedcode-1.0.0a1-py3-none-any.whl
+  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a2/indexedcode-1.0.0a2-py3-none-any.whl
 ```
 
 Both methods download Python dependencies during installation. Verify the commands are available:
@@ -139,10 +139,10 @@ Upgrade using the exact wheel URL of a **published** release and the installer t
 
 ```bash
 uv tool install --force --python 3.12 \
-  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a1/indexedcode-1.0.0a1-py3-none-any.whl
+  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a2/indexedcode-1.0.0a2-py3-none-any.whl
 # Or:
 pipx install --force \
-  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a1/indexedcode-1.0.0a1-py3-none-any.whl
+  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a2/indexedcode-1.0.0a2-py3-none-any.whl
 ```
 
 A direct URL pins a release; do not assume `uv tool upgrade` or `pipx upgrade` discovers newer GitHub assets. Check `indexedcode --version`, restart the writer, and run `status` with your root/database paths. Read release notes for rebuild requirements; cross-version database migration is not promised. To rebuild safely, retain the old database and use `index once` with a new external database path. To roll back, stop the writer, reinstall the previous wheel, and use its known-good backup at a separate path.
