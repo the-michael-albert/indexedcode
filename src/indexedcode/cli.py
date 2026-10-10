@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import signal
 import sys
 import threading
@@ -17,8 +18,24 @@ import time
 
 from indexedcode import retrieval
 from indexedcode.db import WriterLock, connect, initialize
+from indexedcode.logs import configure_logging
 from indexedcode.pipeline import run_until_idle
 from indexedcode.reconcile import reconcile
+
+logger = logging.getLogger(__name__)
+
+
+def _reconcile_logged(conn, root, what):
+    """reconcile() plus one log line when it found work (or on request)."""
+    result = reconcile(conn, root, now_ms=int(time.time() * 1000))
+    if result.refresh_enqueued or result.remove_enqueued:
+        logger.info("%s: %d to index, %d to remove, %d unchanged", what,
+                    result.refresh_enqueued, result.remove_enqueued,
+                    result.unchanged)
+    else:
+        logger.debug("%s: nothing changed (%d unchanged, %d skipped)", what,
+                     result.unchanged, result.skipped)
+    return result
 
 
 def _open_writer(db_path):
@@ -31,8 +48,16 @@ def _cmd_index_once(args) -> int:
     conn = _open_writer(args.db)
     try:
         with WriterLock(_writer_lock_path(args.db)):
+            logger.info("indexing %s", args.root)
             result = reconcile(conn, args.root)
-            run_until_idle(conn, args.root, now_ms=int(time.time() * 1000))
+            logger.info("found %d to index, %d to remove, %d unchanged",
+                        result.refresh_enqueued, result.remove_enqueued,
+                        result.unchanged)
+            counts = run_until_idle(conn, args.root,
+                                    now_ms=int(time.time() * 1000))
+            logger.info("done: %d indexed, %d removed, %d retried, %d failed",
+                        counts.get("completed", 0), counts.get("removed", 0),
+                        counts.get("retried", 0), counts.get("failed", 0))
             ready = conn.execute(
                 "SELECT COUNT(*) AS c FROM files WHERE status = 'ready'"
             ).fetchone()["c"]
@@ -111,9 +136,12 @@ def _cmd_serve(args) -> int:
     conn = _open_writer(args.db)
 
     with WriterLock(_writer_lock_path(args.db)):
+        logger.info("watching %s", args.root)
+        logger.info("index database %s", args.db)
         # initial reconciliation: index the tree before accepting traffic
-        reconcile(conn, args.root, now_ms=int(time.time() * 1000))
-        run_until_idle(conn, args.root, now_ms=int(time.time() * 1000))
+        _reconcile_logged(conn, args.root, "initial scan")
+        _drain(conn, args.root)
+        logger.info("initial index ready")
 
         dirty = set()
 
@@ -133,8 +161,10 @@ def _cmd_serve(args) -> int:
                         rel = _relative(path, args.root)
                         if rel:
                             watcher.record(rel, now=time.monotonic())
-            except Exception:
-                pass  # polling fallback below keeps the index converging
+            except Exception as exc:
+                # the periodic scan below keeps the index converging
+                logger.warning("file watcher stopped (%s); falling back to"
+                               " periodic scans", exc)
 
         threading.Thread(target=watch_events, daemon=True).start()
 
@@ -142,8 +172,13 @@ def _cmd_serve(args) -> int:
                               port=args.http_port)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         print(f"listening {httpd.base_url}", file=sys.stderr, flush=True)
+        logger.info("dashboard %s/  ·  agent docs %s/llms.txt",
+                    httpd.base_url, httpd.base_url)
+        if args.http_token is None:
+            logger.debug("no --http-token: loopback-only access")
 
         def request_stop(signum, frame):
+            logger.info("stopping (%s)", signal.Signals(signum).name)
             stop.set()
 
         signal.signal(signal.SIGTERM, request_stop)
@@ -155,21 +190,26 @@ def _cmd_serve(args) -> int:
                 now = time.monotonic()
                 watcher.flush(now)
                 if dirty:
+                    logger.debug("%d changed path(s) from the file watcher",
+                                 len(dirty))
                     dirty.clear()
-                    reconcile(conn, args.root,
-                              now_ms=int(time.time() * 1000))
-                run_until_idle(conn, args.root,
-                               now_ms=int(time.time() * 1000))
+                    _reconcile_logged(conn, args.root, "change detected")
+                _drain(conn, args.root)
                 if now - last_reconcile >= args.poll_interval_s:
-                    reconcile(conn, args.root,
-                              now_ms=int(time.time() * 1000))
+                    _reconcile_logged(conn, args.root, "periodic scan")
                     last_reconcile = now
                 stop.wait(0.1)
         finally:
             httpd.shutdown()
             httpd.server_close()
     conn.close()
+    logger.info("stopped")
     return 0
+
+
+def _drain(conn, root):
+    """Process every due job; the pipeline logs each file it handles."""
+    return run_until_idle(conn, root, now_ms=int(time.time() * 1000))
 
 
 def _writer_lock_path(db_path):
@@ -198,6 +238,12 @@ def build_parser():
     parser = argparse.ArgumentParser(prog="indexedcode")
     parser.add_argument("--version", action="version",
                         version=f"%(prog)s {installed_version}")
+    verbosity = parser.add_mutually_exclusive_group()
+    verbosity.add_argument("-v", "--verbose", action="store_true",
+                           help="also log debug detail (HTTP requests,"
+                                " scan results)")
+    verbosity.add_argument("-q", "--quiet", action="store_true",
+                           help="log warnings and errors only")
 
     def add_common(sub):
         sub.add_argument("--root", default=".")
@@ -261,6 +307,7 @@ def build_parser():
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    configure_logging(verbose=int(args.verbose), quiet=args.quiet)
     return args.func(args)
 
 

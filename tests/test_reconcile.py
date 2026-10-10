@@ -201,3 +201,36 @@ def test_previously_skipped_reasons_are_not_reenqueued(db, repo):
     result = reconcile(db, str(repo), now_ms=90_000)
     # oversized files are skipped observations, not silent refreshes
     assert result.skipped >= 1
+
+
+def test_unchanged_syntax_error_file_is_not_requeued_every_scan(tmp_path):
+    import os
+
+    from indexedcode.db import connect, initialize
+    from indexedcode.pipeline import run_until_idle
+    from indexedcode.reconcile import reconcile
+
+    (tmp_path / "bad.py").write_text("def b(:\n")
+    conn = connect(tmp_path / "i.sqlite", writer=True)
+    initialize(conn)
+    reconcile(conn, str(tmp_path), now_ms=1000)
+    run_until_idle(conn, str(tmp_path), now_ms=1000)
+    status = conn.execute("SELECT status, last_error FROM files").fetchone()
+    assert (status["status"], status["last_error"]) == ("error", "parse_error")
+
+    for scan in range(3):
+        result = reconcile(conn, str(tmp_path), now_ms=2000 + scan)
+        assert result.refresh_enqueued == 0
+        assert result.unchanged == 1
+    assert conn.execute(
+        "SELECT COUNT(*) AS c FROM jobs WHERE status IN ('pending','retry')"
+    ).fetchone()["c"] == 0
+
+    # fixing the file (a real change on disk) re-queues and indexes it
+    (tmp_path / "bad.py").write_text("def b():\n    return 1\n")
+    os.utime(tmp_path / "bad.py", ns=(1, 2_000_000_000))
+    result = reconcile(conn, str(tmp_path), now_ms=3000)
+    assert result.refresh_enqueued == 1
+    run_until_idle(conn, str(tmp_path), now_ms=3000)
+    assert conn.execute("SELECT status FROM files").fetchone()["status"] == "ready"
+    conn.close()

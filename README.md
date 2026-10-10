@@ -67,6 +67,20 @@ The core command defaults remain `--root .` and `--db index.sqlite`, relative to
 
 HTTP has no authentication by default; keep it local. `--http-token` enables bearer authentication, but command-line secrets may be visible to local process inspection. Do not expose the service publicly. See [service-manager examples](docs/ops/service-units.md) for launchd and systemd.
 
+## Logs
+
+`indexedcode setup`, `orchestrator serve`, and `index once` print progress to **stderr** as it happens:
+
+```text
+16:43:58 INFO    watching /path/to/repo
+16:43:58 INFO    initial scan: 2 to index, 0 to remove, 0 unchanged
+16:43:58 INFO    indexed one.py (1 functions, 0 classes, 1 ms)
+16:43:58 ERROR   failed bad.py: parse_error: tree-sitter reported syntax errors (gave up after 5 attempts)
+16:44:02 INFO    periodic scan: 1 to index, 0 to remove, 2 unchanged
+```
+
+Use `-v` for debug detail (every HTTP request, scans that found nothing, each retry) and `-q` for warnings and errors only; put the flag before the command, e.g. `indexedcode -v orchestrator serve ...`. stdout is reserved for JSON results, so `indexedcode search ... | jq` is unaffected, and `2>server.log` captures the log. A file with a syntax error is reported once and tried again only after it changes.
+
 ## Web dashboard and `llms.txt`
 
 While `indexedcode setup` or `orchestrator serve` is running, open **http://127.0.0.1:8765/** (or the port you chose) for a live dashboard: index coverage, the queued jobs with the functions waiting to be re-indexed, when each job was queued and last updated, recently indexed functions, and a search box. It refreshes every two seconds.

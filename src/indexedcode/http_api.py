@@ -8,6 +8,7 @@ Requests are capped and responses bounded with explicit truncation.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from http.server import BaseHTTPRequestHandler
 from importlib import resources
@@ -15,6 +16,8 @@ from urllib.parse import urlsplit
 
 from indexedcode import retrieval
 from indexedcode.httpserver import LoopbackHTTPServer
+
+logger = logging.getLogger(__name__)
 
 MAX_REQUEST_BYTES = 32_768
 MAX_RESPONSE_CHARS = retrieval.MAX_CHARS_CAP
@@ -45,8 +48,8 @@ def create_server(conn, root, token=None, host="127.0.0.1", port=0,
     )
 
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *args):
-            pass
+        def log_message(self, format, *args):
+            logger.debug("http %s", format % args)
 
         def _send(self, code, payload):
             body = json.dumps(payload).encode("utf-8")

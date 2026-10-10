@@ -60,6 +60,16 @@ def reconcile(conn, root, now_ms=0):
             _observe(conn, row, stat, row["observed_hash"], now_ms)
             continue
 
+        if (row is not None and row["status"] == "error"
+                and row["last_error"] == "parse_error"
+                and row["observed_mtime_ns"] == stat.st_mtime_ns
+                and row["observed_size_bytes"] == stat.st_size):
+            # a syntax error is deterministic: retrying the same bytes on
+            # every scan only burns CPU. The file is re-queued as soon as it
+            # changes on disk (mtime/size differ).
+            result.unchanged += 1
+            continue
+
         if row is not None and row["status"] == "ready":
             cheap_match = (
                 row["indexed_hash"] is not None
