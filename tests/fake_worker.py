@@ -25,6 +25,10 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+# this script runs as a bare child process without pytest's pythonpath
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 
 def build_handler(secret, fingerprint, embed_status):
@@ -95,10 +99,19 @@ def main():
 
     port = int(os.environ["INDEXEDCODE_WORKER_PORT"])
     secret = os.environ.get("INDEXEDCODE_WORKER_SECRET", "")
-    fingerprint = os.environ.get(
-        "INDEXEDCODE_WORKER_TEST_FP", "sha256:fake-fingerprint"
+    from indexedcode.workers.fingerprint import model_fingerprint
+
+    # advertise the true fingerprint of the model this fake serves, so a
+    # supervisor expecting that model validates successfully
+    fingerprint = os.environ.get("INDEXEDCODE_WORKER_TEST_FP") or (
+        model_fingerprint(
+            model="fake-embed", revision="r1", backend="mlx", dimension=3,
+        )
     )
     embed_status = int(os.environ.get("INDEXEDCODE_WORKER_EMBED_STATUS", 200))
+    if args.mode == "mismatch":
+        # a syntactically valid fingerprint for a *different* model
+        fingerprint = "sha256:" + "f" * 64
 
     if args.mode == "exit":
         sys.exit(3)

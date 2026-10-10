@@ -15,6 +15,8 @@ DEFAULTS = {
         "max_batch_items": 32,
         "max_batch_tokens": 4096,
         "max_concurrent_requests": 1,
+        "remote_url": None,
+        "remote_token": None,
     },
     "summarization": {
         "mode": "managed",
@@ -25,6 +27,8 @@ DEFAULTS = {
         "max_output_tokens": 256,
         "max_concurrent_requests": 1,
         "max_batch_items": 1,
+        "remote_url": None,
+        "remote_token": None,
     },
     "memory": {
         "managed_soft_limit_mb": 2300,
@@ -86,6 +90,13 @@ def load_config(path):
                 f"{section}.backend must be one of {BACKENDS},"
                 f" got {cfg[section]['backend']!r}"
             )
+        if (
+            cfg[section]["mode"] == "remote"
+            and not cfg[section].get("remote_url")
+        ):
+            raise ConfigError(
+                f'{section}.mode = "remote" requires a remote_url'
+            )
 
     for section, key in _POSITIVE_INTS:
         value = cfg[section][key]
@@ -103,6 +114,10 @@ def load_config(path):
 
     if not allow_over_budget:
         for (section, key), limit in BUDGET_PROFILE.items():
+            # remote inference runs on another host: the managed-local
+            # budget profile does not apply and needs no opt-in
+            if cfg[section]["mode"] == "remote":
+                continue
             if cfg[section][key] > limit:
                 raise ConfigError(
                     f"{section}.{key}={cfg[section][key]} exceeds the"

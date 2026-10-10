@@ -111,10 +111,17 @@ def test_unexpected_exit_restarts_within_budget():
     original_pid = worker.pid
     try:
         os.kill(original_pid, signal.SIGKILL)
-        assert wait_until(
-            lambda: worker.state == "ready" and worker.pid != original_pid,
-            timeout=10,
-        ), f"expected restart, state={worker.state!r}"
+
+        def restarted():
+            try:
+                worker.poll()
+            except WorkerFailedError:
+                pass
+            return worker.state == "ready" and worker.pid != original_pid
+
+        assert wait_until(restarted, timeout=10), (
+            f"expected restart, state={worker.state!r}"
+        )
         assert worker.restart_count == 1
         assert pid_alive(worker.pid)
     finally:
@@ -125,13 +132,29 @@ def test_backoff_exhaustion_marks_worker_failed():
     worker = make_worker(mode="ready", restart_budget=1, backoff_s=(0.05,))
     worker.start()
     first_pid = worker.pid
+
+    def pump():
+        try:
+            worker.poll()
+        except WorkerFailedError:
+            pass
+        return True
+
     try:
-        for _ in range(2):  # two crashes exhaust budget 1
-            os.kill(worker.pid, signal.SIGKILL)
-            wait_until(
-                lambda: worker.state in ("ready", "failed"), timeout=10
-            )
-        assert worker.state == "failed"
+        # crash 1: within budget -> restarted with a new pid
+        os.kill(first_pid, signal.SIGKILL)
+        assert wait_until(
+            lambda: pump()
+            and worker.restart_count == 1
+            and worker.state == "ready",
+            timeout=10,
+        ), f"expected restart, state={worker.state!r}"
+        assert worker.pid != first_pid
+        # crash 2: budget exhausted -> terminally failed
+        os.kill(worker.pid, signal.SIGKILL)
+        assert wait_until(
+            lambda: pump() and worker.state == "failed", timeout=10
+        )
         assert not pid_alive(first_pid)
         with pytest.raises(WorkerFailedError):
             worker.poll()

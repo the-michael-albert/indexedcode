@@ -99,7 +99,7 @@ def sqlite_version(conn: sqlite3.Connection):
 # ---------------------------------------------------------------------------
 
 FAKE_WORKER = str(Path(__file__).parent / "fake_worker.py")
-FAKE_FINGERPRINT = "sha256:fake-fingerprint"
+FAKE_FINGERPRINT = "sha256:" + "0" * 64
 
 
 def free_port():
