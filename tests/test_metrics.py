@@ -169,6 +169,8 @@ def test_retention_cleanup_deletes_old_rows_in_batches(db):
             request_duration_ms=1,
         )
     deleted = dal.prune_metrics(db, now_ms=10_000, max_age_ms=5_000, batch=4)
-    assert deleted == 4  # rows recorded at 0,1000,2000,3000... aged > 5000ms
+    assert deleted == 4  # first bounded batch of rows older than 5000ms
     remaining = db.execute("SELECT COUNT(*) FROM metrics").fetchone()[0]
     assert remaining == 6
+    # The rest are pruned on subsequent passes.
+    assert dal.prune_metrics(db, now_ms=10_000, max_age_ms=5_000, batch=100) == 1

@@ -31,6 +31,8 @@ def reader_factory(tmp_path):
     path = tmp_path / "index.sqlite"
 
     def _open():
+        from indexedcode.db import connect
+
         return connect(path, writer=False)
 
     return _open

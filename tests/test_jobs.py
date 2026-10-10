@@ -183,7 +183,10 @@ def test_complete_job_requires_matching_lease_and_revision(db):
         db, job_id=job_id, lease_token=claimed["lease_token"],
         desired_revision=3, now_ms=2000,
     )
-    assert get_job(db, job_id)["status"] == "pending"  # completed, no longer queued
+    # The completed job leaves the queue entirely.
+    assert db.execute(
+        "SELECT COUNT(*) FROM jobs WHERE id = ?", (job_id,)
+    ).fetchone()[0] == 0
 
 
 def test_complete_removes_terminal_job_from_queue(db):

@@ -77,7 +77,9 @@ def test_over_budget_profile_requires_explicit_opt_in(tmp_path):
     content = VALID_TOML.replace("max_output_tokens = 256", "max_output_tokens = 2048")
     with pytest.raises(ConfigError, match="allow_over_budget"):
         load_config(write_config(tmp_path, content))
-    content += "\nallow_over_budget = true\n"
+    content = "allow_over_budget = true\n\n" + VALID_TOML.replace(
+        "max_output_tokens = 256", "max_output_tokens = 2048"
+    )
     cfg = load_config(write_config(tmp_path, content))
     assert cfg["summarization"]["max_output_tokens"] == 2048
 
