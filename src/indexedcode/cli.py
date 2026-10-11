@@ -152,7 +152,11 @@ def _cmd_setup(args) -> int:
     selected = launch_setup(root=args.root, db=args.db, port=args.http_port)
     if selected is None:
         return 0
-    args.root, args.db, args.http_port = selected
+    args.root, args.db, args.http_port, semantic = selected
+    if not semantic.enabled:
+        args.embeddings = False
+    elif semantic.config_path and not args.config:
+        args.config = semantic.config_path
     print(f"watching {args.root}", file=sys.stderr, flush=True)
     return _cmd_serve(args)
 

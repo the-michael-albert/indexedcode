@@ -27,7 +27,11 @@ provider = "openai"               # embeddings: OpenAI-compatible only
 # dimensions = 512                # optional, for models that support it
 ```
 
-API keys are read from environment variables (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` by default, or the variable named by `api_key_env`), never from the config file. `base_url` must be `https://` (plain `http://` only for localhost). You can mix modes, for example a hosted summarizer with a local embedder. **Entity source code is sent to the provider for summarization, and generated summaries are sent for embedding**; use local mode for code that must not leave the machine. Changing provider or model changes the fingerprint, so affected summaries and vectors are regenerated.
+API keys are read from environment variables (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` by default, or the variable named by `api_key_env`); `indexedcode setup` can instead save a key as `api_key` in an owner-only `indexedcode.toml` next to the index database. `base_url` must be `https://` (plain `http://` only for localhost). You can mix modes, for example a hosted summarizer with a local embedder. **Entity source code is sent to the provider for summarization, and generated summaries are sent for embedding**; use local mode for code that must not leave the machine. Changing provider or model changes the fingerprint, so affected summaries and vectors are regenerated.
+
+### Worker pools in Docker (Vulkan)
+
+For an AMD/Intel GPU box, `deploy/docker/docker-compose.yml` runs the summarization and embedding services as scalable pools of workers behind a least-connections gateway; see [docs/ops/docker-vulkan.md](docs/ops/docker-vulkan.md). Quick start: `cd deploy/docker && cp .env.example .env` (set the token), then `docker compose up -d --build`. `indexedcode setup` has a switch for semantic search and, per stage, a choice of local models, the remote worker pool (URL and token) or a hosted API (provider, URL, key, model, parallel requests).
 
 Supported source languages include Python, JavaScript, TypeScript, Go, Rust, Java, C, and C++. References are syntactic candidates, not a compiler-backed call graph.
 

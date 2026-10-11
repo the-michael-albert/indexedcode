@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tomllib
+from urllib.parse import urlsplit
 
 from indexedcode.workers.adapters import default_backend, default_model
 from indexedcode.workers.api import PROVIDERS, default_api_model
@@ -24,6 +25,7 @@ DEFAULTS = {
         "provider": None,
         "base_url": None,
         "api_key_env": None,
+        "api_key": None,
         "dimensions": None,
     },
     "summarization": {
@@ -40,6 +42,7 @@ DEFAULTS = {
         "provider": None,
         "base_url": None,
         "api_key_env": None,
+        "api_key": None,
     },
     "memory": {
         "managed_soft_limit_mb": 2300,
@@ -80,6 +83,13 @@ class ConfigError(ValueError):
     """The configuration file is invalid."""
 
 
+def _secure_url(url) -> bool:
+    """https anywhere, or plain http to this machine (no network hop)."""
+    parts = urlsplit(str(url))
+    return parts.scheme == "https" or (
+        parts.scheme == "http" and parts.hostname in ("localhost", "127.0.0.1"))
+
+
 def _resolve_api_section(section, cfg, given):
     """Validate a hosted-API section and fill provider-specific defaults."""
     provider = cfg.get("provider")
@@ -100,10 +110,7 @@ def _resolve_api_section(section, cfg, given):
     if "max_concurrent_requests" not in given:
         cfg["max_concurrent_requests"] = API_CONCURRENCY
     base_url = cfg.get("base_url")
-    if base_url and not (
-        str(base_url).startswith("https://")
-        or str(base_url).startswith(("http://localhost", "http://127.0.0.1"))
-    ):
+    if base_url and not _secure_url(base_url):
         raise ConfigError(
             f"{section}.base_url must use https:// (API keys are sent as"
             " bearer credentials); plain http is allowed for localhost only"
@@ -148,10 +155,11 @@ def load_config(path):
                 f'{section}.mode = "remote" requires a remote_url'
             )
         remote_url = cfg[section].get("remote_url")
-        if remote_url and not str(remote_url).startswith("https://"):
+        if remote_url and not _secure_url(remote_url):
             raise ConfigError(
                 f"{section}.remote_url must use https://"
-                " (bearer authentication requires encrypted transport)"
+                " (bearer authentication requires encrypted transport);"
+                " plain http is allowed for localhost only"
             )
 
     for section, key in _POSITIVE_INTS:
