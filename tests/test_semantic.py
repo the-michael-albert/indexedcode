@@ -21,9 +21,10 @@ from indexedcode.workers.adapters import backend_available, default_backend
 from indexedcode.workers.errors import BackendUnavailableError
 from indexedcode.workers.factory import _expected_fingerprint
 from indexedcode.workers.fingerprint import model_fingerprint
-from indexedcode.workers.protocol import EmbedResponse
+from indexedcode.workers.protocol import EmbedResponse, SummaryResponse
 
-from tests.conftest import FakeEmbedder, fake_vector, write_repo_sources
+from tests.conftest import (
+    FakeEmbedder, FakeSummarizer, fake_vector, write_repo_sources)
 
 FP_A = "sha256:" + "a" * 64
 FP_B = "sha256:" + "b" * 64
@@ -212,10 +213,21 @@ class StubClient:
         return EmbedResponse(vectors=vectors, dimension=self.dimension,
                              fingerprint=self.fingerprint)
 
+    def summarize(self, prompt, max_output_tokens):
+        self.summary_calls = getattr(self, "summary_calls", [])
+        self.summary_calls.append(prompt)
+        return SummaryResponse(summary="a summary", fingerprint=FP_A)
+
     def model_info(self):
         class Info:
             fingerprint = FP_A
         return Info()
+
+
+@pytest.fixture(autouse=True)
+def _runtime_present(monkeypatch):
+    """Worker-start tests stub the workers; the host has no ML runtime."""
+    monkeypatch.setattr(semantic, "check_runtime", lambda role, cfg: None)
 
 
 def test_embed_batches_by_max_batch_items():
@@ -302,6 +314,8 @@ def test_start_semantic_index_remote_worker(monkeypatch):
     assert index.fingerprint == FP_A
     assert index.client.timeout_s == semantic.EMBED_TIMEOUT_S
     assert index.client.calls == [["warmup"]]
+    assert index.summary_client is not index.client
+    assert len(index.summary_client.summary_calls) == 1  # summary warmed up
 
 
 def test_start_semantic_index_managed_worker_warms_up(monkeypatch):
@@ -382,10 +396,12 @@ def fingerprints(conn):
         "SELECT model_fingerprint FROM entity_index"))
 
 
-def index_with(conn, root, embed, fingerprint, now_ms=1000):
+def index_with(conn, root, embed, fingerprint, now_ms=1000,
+               summarize=None):
     reconcile(conn, str(root), now_ms=now_ms, model_fingerprint=fingerprint)
-    return run_until_idle(conn, str(root), embed=embed, now_ms=now_ms,
-                          model_fingerprint=fingerprint)
+    return run_until_idle(conn, str(root), embed=embed,
+                          summarize=summarize or FakeSummarizer(),
+                          now_ms=now_ms, model_fingerprint=fingerprint)
 
 
 def test_run_until_idle_stamps_rows_with_model_fingerprint(db, repo):
@@ -405,8 +421,8 @@ def test_reconcile_backfills_ready_files_lacking_vectors(db, repo):
     result = reconcile(db, str(repo), now_ms=3000, model_fingerprint=FP_A)
     assert result.refresh_enqueued == 1
     embed = FakeEmbedder()
-    run_until_idle(db, str(repo), embed=embed, now_ms=3000,
-                   model_fingerprint=FP_A)
+    run_until_idle(db, str(repo), embed=embed, summarize=FakeSummarizer(),
+                   now_ms=3000, model_fingerprint=FP_A)
     assert fingerprints(db) == [FP_A, FP_A]
     assert len(embed.calls) == 1 and len(embed.calls[0]) == 2
 
@@ -432,8 +448,8 @@ def test_model_change_reembeds_unchanged_entities(db, repo):
     embed = FakeEmbedder()
     result = reconcile(db, str(repo), now_ms=5000, model_fingerprint=FP_B)
     assert result.refresh_enqueued == 1
-    run_until_idle(db, str(repo), embed=embed, now_ms=5000,
-                   model_fingerprint=FP_B)
+    run_until_idle(db, str(repo), embed=embed, summarize=FakeSummarizer(),
+                   now_ms=5000, model_fingerprint=FP_B)
     assert fingerprints(db) == [FP_B, FP_B]
     assert len(embed.calls[0]) == 2
 
@@ -443,7 +459,8 @@ def test_unchanged_entities_with_current_model_are_not_reembedded(db, repo):
     embed = FakeEmbedder()
     enqueue_job(db, command="refresh_file", folder="src", file="a.py",
                 now_ms=2000)
-    outcome = process_next_job(db, str(repo), embed=embed, now_ms=2001,
+    outcome = process_next_job(db, str(repo), embed=embed,
+                               summarize=FakeSummarizer(), now_ms=2001,
                                model_fingerprint=FP_A)
     assert outcome == "completed"
     assert embed.calls == []
@@ -531,10 +548,15 @@ def test_http_search_without_embedder_is_still_degraded(indexed_repo):
 
 class FakeSemantic:
     fingerprint = FP_A
+    summary_fingerprint = FP_B
 
     def __init__(self):
         self.embedder = FakeEmbedder()
+        self.summarizer = FakeSummarizer()
         self.stopped = False
+
+    def summarize(self, texts):
+        return self.summarizer(texts)
 
     def embed(self, texts):
         return self.embedder(texts)
@@ -548,7 +570,7 @@ def cli_semantic(monkeypatch):
     fake = FakeSemantic()
     calls = []
 
-    def starter(config_path=None, enabled=True):
+    def starter(config_path=None, enabled=True, **kw):
         calls.append({"config": config_path, "enabled": enabled})
         return fake if enabled else None
 
@@ -588,7 +610,7 @@ def test_index_once_backfills_an_existing_lexical_index(
 
     fake = FakeSemantic()
     monkeypatch.setattr("indexedcode.cli.try_start_semantic_index",
-                        lambda config_path=None, enabled=True: fake)
+                        lambda config_path=None, enabled=True, **kw: fake)
     assert main(["index", "once", "--root", str(root), "--db", str(db)]) == 0
     summary = json.loads(capsys.readouterr().out)
     assert summary["files_refreshed"] == 3
@@ -633,7 +655,8 @@ def test_reconcile_logged_reports_candidate_counts(db, repo, caplog):
     from indexedcode.cli import _reconcile_logged
 
     with caplog.at_level(logging.INFO):
-        result = _reconcile_logged(db, str(repo), "initial scan", FP_A)
+        result = _reconcile_logged(db, str(repo), "initial scan",
+                                   FakeSemantic())
     assert result.candidates == 1
     assert "scanned 1 candidate files" in caplog.text
 
@@ -641,7 +664,9 @@ def test_reconcile_logged_reports_candidate_counts(db, repo, caplog):
 def test_drain_passes_embedder_and_fingerprint(db, repo):
     from indexedcode.cli import _drain
 
-    reconcile(db, str(repo), now_ms=0, model_fingerprint=FP_A)
+    reconcile(db, str(repo), now_ms=0, model_fingerprint=FP_A,
+              summary_fingerprint=FP_B)
     fake = FakeSemantic()
     _drain(db, str(repo), fake)
     assert fingerprints(db) == [FP_A, FP_A]
+    assert fake.summarizer.calls  # summaries came first

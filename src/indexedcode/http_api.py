@@ -31,7 +31,8 @@ def _load_web(name: str) -> bytes:
 def create_server(conn, root, token=None, host="127.0.0.1", port=0,
                   max_request_bytes=MAX_REQUEST_BYTES,
                   max_response_chars=retrieval.DEFAULT_MAX_CHARS,
-                  embedder=None, model_fingerprint=None):
+                  embedder=None, model_fingerprint=None,
+                  inference_status=None):
     """Build a ready-to-run HTTP server bound to a loopback port.
 
     ``embedder`` (texts -> vectors) enables semantic and hybrid search;
@@ -109,7 +110,10 @@ def create_server(conn, root, token=None, host="127.0.0.1", port=0,
                 return self._send(401, {"error": "unauthorized"})
             try:
                 if method == "GET" and target.path == "/v1/status":
-                    return self._send(200, retrieval.get_status(conn, root))
+                    return self._send(200, retrieval.get_status(
+                        conn, root,
+                        inference_status=(inference_status()
+                                          if inference_status else None)))
                 if method == "GET" and target.path == "/v1/queue":
                     return self._send(200, retrieval.get_queue(
                         conn, now_ms=int(time.time() * 1000)))

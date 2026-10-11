@@ -11,7 +11,6 @@ attempts fail terminally with a categorical error code.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import time
 from pathlib import Path
@@ -45,7 +44,8 @@ _PROCESS_COMMANDS = ("refresh_file", "remove_file")
 
 def run_until_idle(conn, root, *, embed=None, summarize=None, now_ms=0,
                    step_ms=1000, max_iterations=10_000,
-                   model_fingerprint="unpinned"):
+                   model_fingerprint="unpinned",
+                   summary_fingerprint="unpinned"):
     """Process every due job (advancing past retry delays) until idle.
 
     Returns a summary dict of outcome counts. Shared by the CLI's
@@ -58,6 +58,7 @@ def run_until_idle(conn, root, *, embed=None, summarize=None, now_ms=0,
             conn, root, embed=embed, summarize=summarize, now_ms=now,
             retry_base_ms=1, retry_cap_ms=1, jitter=lambda: 0,
             model_fingerprint=model_fingerprint,
+            summary_fingerprint=summary_fingerprint,
         )
         if outcome is None:
             next_due = conn.execute(
@@ -85,13 +86,23 @@ def process_next_job(
     retry_cap_ms=60_000,
     jitter=None,
     model_fingerprint="unpinned",
+    summary_fingerprint="unpinned",
 ):
     """Claim and run the next due job; return the outcome string or None.
 
     Outcomes: ``"completed"``, ``"removed"``, ``"retried"``, ``"failed"``.
     ``embed`` maps a list of texts to a list of float vectors; ``summarize``
     maps a list of texts to a list of summary strings.
+
+    Inference is a two-stage pipeline: each changed entity is summarized
+    first and the *generated summary* is what gets embedded. ``embed``
+    therefore requires ``summarize``; a failed summary fails the file's
+    refresh (retryable) rather than embedding raw source instead.
     """
+    if embed is not None and summarize is None:
+        raise ValueError(
+            "embedding requires summarization: summaries are the embedding"
+            " input, raw source is never embedded")
     job = claim_next_job(conn, now_ms=now_ms, lease_ms=lease_ms)
     if job is None:
         return None
@@ -180,49 +191,70 @@ def process_next_job(
     )
 
     # --- changed-entity detection (§7.2.4: inference only for changes) ----
-    old_hashes, old_index = _existing_snapshot(conn, file_row)
-    def needs_vector(kind, qname):
-        # backfill: with an embedder, an entity lacking a vector from the
-        # current model needs one even though its source is unchanged
-        if embed is None:
+    old_hashes, old_summaries, old_index = _existing_snapshot(conn, file_row)
+    entities = [("function", fn) for fn in extracted.functions]
+    entities += [("class", cls) for cls in extracted.classes]
+
+    # stage 1: summaries. An entity keeps its stored summary while it was
+    # produced from the same source by the same summary model.
+    summaries: dict[tuple, tuple[str, str]] = {}  # key -> (text, identity)
+    to_summarize = []
+    for kind, ent in entities:
+        key = (kind, ent.qualified_name)
+        old = old_summaries.get(key)
+        identity = _summary_identity(summary_fingerprint, ent.source_hash)
+        if summarize is None:
+            # no summarizer: keep a summary only while its source is intact
+            if (old is not None and old[0] and old[1]
+                    and old_hashes.get(key) == ent.source_hash):
+                summaries[key] = old
+        elif old is not None and old[0] and old[1] == identity:
+            summaries[key] = old
+        else:
+            to_summarize.append((key, ent, identity))
+
+    # stage 2: vectors, computed from summaries only
+    def needs_vector(key):
+        if embed is None or key not in summaries:
             return False
-        old = old_index.get((kind, qname))
-        return old is None or old["model_fingerprint"] != model_fingerprint
+        old = old_index.get(key)
+        return (old is None or old["model_fingerprint"] != model_fingerprint
+                or old["input_hash"]
+                != _vector_identity(model_fingerprint, summaries[key][1]))
 
-    changed_functions = [
-        fn for fn in extracted.functions
-        if old_hashes.get(("function", fn.qualified_name)) != fn.source_hash
-        or needs_vector("function", fn.qualified_name)
-    ]
-    changed_classes = [
-        cls for cls in extracted.classes
-        if old_hashes.get(("class", cls.qualified_name)) != cls.source_hash
-        or needs_vector("class", cls.qualified_name)
-    ]
-    inference_texts = [fn.source for fn in changed_functions]
-    inference_texts += [cls.source for cls in changed_classes]
-
-    vectors: dict[str, list[float]] = {}
-    summaries: dict[str, str] = {}
+    vectors: dict[tuple, list[float]] = {}
     inference_calls = 0
-    if inference_texts:
-        try:
-            if embed is not None:
-                embedded = embed(inference_texts)
-                for text, vector in zip(inference_texts, embedded):
-                    vectors[text] = vector
-                inference_calls += 1
-            if summarize is not None:
-                for text, summary in zip(inference_texts, summarize(inference_texts)):
-                    summaries[text] = summary
-                inference_calls += 1
-        except Exception as exc:
-            _mark_file_error(conn, folder, file, "inference_error", now_ms,
-                             language=language)
-            return finish_retry(
-                "inference_error", f"inference dependency failed: {exc}",
-                detail={"inference_calls": inference_calls},
-            )
+    try:
+        if to_summarize:
+            texts = [ent.source for _, ent, _ in to_summarize]
+            generated = list(summarize(texts))
+            inference_calls += 1
+            if len(generated) != len(texts):
+                raise ValueError(
+                    f"summarizer returned {len(generated)} summaries for"
+                    f" {len(texts)} entities")
+            for (key, _ent, identity), text in zip(to_summarize, generated):
+                if not isinstance(text, str) or not text.strip():
+                    raise ValueError(f"empty summary for {key[1]}")
+                summaries[key] = (text.strip(), identity)
+        to_embed = [key for key in
+                    ((kind, ent.qualified_name) for kind, ent in entities)
+                    if needs_vector(key)]
+        if to_embed:
+            embedded = embed([summaries[key][0] for key in to_embed])
+            inference_calls += 1
+            if len(embedded) != len(to_embed):
+                raise ValueError(
+                    f"embedder returned {len(embedded)} vectors for"
+                    f" {len(to_embed)} summaries")
+            vectors = dict(zip(to_embed, embedded))
+    except Exception as exc:
+        _mark_file_error(conn, folder, file, "inference_error", now_ms,
+                         language=language)
+        return finish_retry(
+            "inference_error", f"inference dependency failed: {exc}",
+            detail={"inference_calls": inference_calls},
+        )
 
     # --- revalidate the snapshot before publication (§7.2.5) --------------
     try:
@@ -236,10 +268,6 @@ def process_next_job(
         )
 
     # --- build the publication payload ------------------------------------
-    summary_digest = hashlib.sha256(
-        (model_fingerprint + "\x00").encode("utf-8")
-    ).hexdigest()
-
     functions = [
         FunctionDef(
             name=fn.name,
@@ -253,10 +281,8 @@ def process_next_job(
             source_hash=fn.source_hash,
             parent_class_qname=fn.parent_class_qname,
             parent_function_qname=fn.parent_function_qname,
-            summary=summaries.get(fn.source),
-            summary_input_hash=(
-                summary_digest if summaries.get(fn.source) else None
-            ),
+            summary=_summary_text(summaries, "function", fn),
+            summary_input_hash=_summary_id(summaries, "function", fn),
         )
         for fn in extracted.functions
     ]
@@ -272,6 +298,8 @@ def process_next_job(
             source=cls.source,
             source_hash=cls.source_hash,
             parent_class_qname=cls.parent_class_qname,
+            summary=_summary_text(summaries, "class", cls),
+            summary_input_hash=_summary_id(summaries, "class", cls),
         )
         for cls in extracted.classes
     ]
@@ -288,7 +316,7 @@ def process_next_job(
         for rels in extracted.relationships
     ]
     entity_index = _entity_index_rows(
-        extracted, vectors, old_index, model_fingerprint,
+        extracted, vectors, summaries, old_index, model_fingerprint,
     )
 
     stat = path.stat()
@@ -352,86 +380,88 @@ def _mark_file_error(conn, folder, file, code, now_ms, language=None):
     )
 
 
+def _summary_identity(summary_fingerprint, source_hash):
+    """Identity of a summary: the summary model and the source it read."""
+    return f"{summary_fingerprint}:{source_hash}"
+
+
+def _vector_identity(model_fingerprint, summary_identity):
+    """Identity of a vector: the embedding model and the summary embedded."""
+    return f"{model_fingerprint}:{summary_identity}"
+
+
+def _summary_text(summaries, kind, ent):
+    found = summaries.get((kind, ent.qualified_name))
+    return found[0] if found else None
+
+
+def _summary_id(summaries, kind, ent):
+    found = summaries.get((kind, ent.qualified_name))
+    return found[1] if found else None
+
+
 def _existing_snapshot(conn, file_row):
-    """Return ({(type, qname): source_hash}, {(type, qname): index row})."""
+    """Return the stored state of a file's entities, keyed by (kind, qname):
+    ({source_hash}, {(summary, summary_input_hash)}, {entity_index row})."""
     file_id = file_row["id"]
-    hashes = {}
-    for row in conn.execute(
-        "SELECT qualified_name, source_hash FROM functions WHERE file_id = ?",
-        (file_id,),
-    ):
-        hashes[("function", row["qualified_name"])] = row["source_hash"]
-    for row in conn.execute(
-        "SELECT qualified_name, source_hash FROM classes WHERE file_id = ?",
-        (file_id,),
-    ):
-        hashes[("class", row["qualified_name"])] = row["source_hash"]
-    index = {}
-    qname_by_id = {}
-    for row in conn.execute(
-        "SELECT id, qualified_name FROM functions WHERE file_id = ?",
-        (file_id,),
-    ):
-        qname_by_id[("function", row["id"])] = row["qualified_name"]
-    for row in conn.execute(
-        "SELECT id, qualified_name FROM classes WHERE file_id = ?",
-        (file_id,),
-    ):
-        qname_by_id[("class", row["id"])] = row["qualified_name"]
-    for entity_type, entity_id in qname_by_id:
-        row = conn.execute(
-            "SELECT * FROM entity_index WHERE entity_type = ?"
-            " AND entity_id = ?",
-            (entity_type, entity_id),
-        ).fetchone()
-        if row is not None:
-            index[(entity_type, qname_by_id[(entity_type, entity_id)])] = row
-    return hashes, index
+    hashes, summaries, index = {}, {}, {}
+    for kind, table in (("function", "functions"), ("class", "classes")):
+        for row in conn.execute(
+            f"SELECT id, qualified_name, source_hash, summary,"
+            f" summary_input_hash FROM {table} WHERE file_id = ?",
+            (file_id,),
+        ):
+            key = (kind, row["qualified_name"])
+            hashes[key] = row["source_hash"]
+            summaries[key] = (row["summary"], row["summary_input_hash"])
+            vector = conn.execute(
+                "SELECT * FROM entity_index WHERE entity_type = ?"
+                " AND entity_id = ?",
+                (kind, row["id"]),
+            ).fetchone()
+            if vector is not None:
+                index[key] = vector
+    return hashes, summaries, index
 
 
-def _entity_index_rows(extracted, vectors, old_index, model_fingerprint):
-    """One search row per function/class: fresh vectors for changed
-    sources, the retained embedding reused for unchanged sources."""
+def _entity_index_rows(extracted, vectors, summaries, old_index,
+                       model_fingerprint):
+    """One search row per function/class. Vectors are embeddings of the
+    generated summary; ``search_text`` stays the raw source so lexical
+    retrieval is unaffected. An unchanged retained vector is reused."""
     rows = []
-    for fn in extracted.functions:
-        rows.append(_index_row(
-            "function", fn.qualified_name, fn.source, fn.source_hash,
-            vectors, old_index, model_fingerprint,
-        ))
-    for cls in extracted.classes:
-        rows.append(_index_row(
-            "class", cls.qualified_name, cls.source, cls.source_hash,
-            vectors, old_index, model_fingerprint,
-        ))
+    for kind, entities in (("function", extracted.functions),
+                           ("class", extracted.classes)):
+        for ent in entities:
+            rows.append(_index_row(
+                kind, ent, vectors, summaries, old_index, model_fingerprint))
     return [row for row in rows if row is not None]
 
 
-def _index_row(entity_type, qname, source, source_hash, vectors, old_index,
-               model_fingerprint):
-    vector = vectors.get(source)
+def _index_row(kind, ent, vectors, summaries, old_index, model_fingerprint):
+    key = (kind, ent.qualified_name)
+    vector = vectors.get(key)
     if vector is not None:
         embedding = pack(vector)
         dimensions = len(vector)
+        input_hash = _vector_identity(model_fingerprint, summaries[key][1])
     else:
-        old = old_index.get((entity_type, qname))
-        if old is not None:
-            embedding = old["embedding"]
-            dimensions = old["embedding_dimensions"]
-            # a retained vector keeps the identity of the model that made it
-            model_fingerprint = old["model_fingerprint"]
-        else:
-            embedding = None  # no inference available; omit the row
-    if embedding is None:
-        return None
+        old = old_index.get(key)
+        if old is None:
+            return None  # no inference available; omit the row
+        embedding = old["embedding"]
+        dimensions = old["embedding_dimensions"]
+        # a retained vector keeps the identity of what produced it, so a
+        # later run notices it is stale and recomputes it
+        model_fingerprint = old["model_fingerprint"]
+        input_hash = old["input_hash"]
     return {
-        "entity_type": entity_type,
-        "entity_key": qname,
-        "search_text": source,
+        "entity_type": kind,
+        "entity_key": ent.qualified_name,
+        "search_text": ent.source,
         "embedding": embedding,
         "dimensions": dimensions,
-        "input_hash": hashlib.sha256(
-            (model_fingerprint + "\x00" + source_hash).encode("utf-8")
-        ).hexdigest(),
+        "input_hash": input_hash,
         "model_fingerprint": model_fingerprint,
         "embedding_truncated": False,
     }

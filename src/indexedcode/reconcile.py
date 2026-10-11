@@ -31,12 +31,18 @@ class ReconcileResult:
         self.candidates = 0
 
 
-def reconcile(conn, root, now_ms=0, model_fingerprint=None):
+def reconcile(conn, root, now_ms=0, model_fingerprint=None,
+              summary_fingerprint=None):
     """Bring the store's pending work in line with the on-disk tree.
 
-    With ``model_fingerprint`` set, ready files whose entities lack a
-    vector from that model are re-queued too (embedding backfill).
+    With ``summary_fingerprint`` set, ready files whose entities lack a
+    current summary are re-queued (summary backfill, independent of
+    vectors). With ``model_fingerprint`` set, files whose entities lack a
+    vector of that model computed from the current summary are re-queued
+    too (embedding backfill); embedding implies summarization.
     """
+    if model_fingerprint is not None and summary_fingerprint is None:
+        summary_fingerprint = "unpinned"
     result = ReconcileResult()
     scan = scan_repository(root)
 
@@ -87,7 +93,8 @@ def reconcile(conn, root, now_ms=0, model_fingerprint=None):
                 and row["observed_size_bytes"] == stat.st_size
             )
             if cheap_match:
-                if _needs_backfill(conn, row, model_fingerprint):
+                if _needs_backfill(conn, row, model_fingerprint,
+                                   summary_fingerprint):
                     _enqueue_refresh(
                         conn, row, stat, row["indexed_hash"], now_ms,
                         candidate.language, candidate.is_test)
@@ -101,7 +108,8 @@ def reconcile(conn, root, now_ms=0, model_fingerprint=None):
                 result.skipped += 1
                 continue
             if digest == row["indexed_hash"]:
-                if _needs_backfill(conn, row, model_fingerprint):
+                if _needs_backfill(conn, row, model_fingerprint,
+                                   summary_fingerprint):
                     _enqueue_refresh(conn, row, stat, digest, now_ms,
                                      candidate.language, candidate.is_test)
                     result.refresh_enqueued += 1
@@ -129,16 +137,23 @@ def reconcile(conn, root, now_ms=0, model_fingerprint=None):
     return result
 
 
-def _needs_backfill(conn, row, model_fingerprint):
-    """True when a ready file has an entity without a current-model vector."""
-    if model_fingerprint is None:
-        return False
+def _needs_backfill(conn, row, model_fingerprint, summary_fingerprint):
+    """True when a ready file has an entity lacking a current summary
+    and/or a current-model vector made from that summary."""
     for table, kind in (("functions", "function"), ("classes", "class")):
-        if conn.execute(
+        if summary_fingerprint is not None and conn.execute(
+            f"SELECT 1 FROM {table} t WHERE t.file_id = ? AND ("
+            " t.summary IS NULL OR t.summary_input_hash IS NOT ? || ':' ||"
+            " t.source_hash) LIMIT 1",
+            (row["id"], summary_fingerprint),
+        ).fetchone() is not None:
+            return True
+        if model_fingerprint is not None and conn.execute(
             f"SELECT 1 FROM {table} t WHERE t.file_id = ? AND NOT EXISTS ("
             " SELECT 1 FROM entity_index e WHERE e.entity_type = ?"
-            " AND e.entity_id = t.id AND e.model_fingerprint = ?) LIMIT 1",
-            (row["id"], kind, model_fingerprint),
+            " AND e.entity_id = t.id AND e.model_fingerprint = ?"
+            " AND e.input_hash = ? || ':' || t.summary_input_hash) LIMIT 1",
+            (row["id"], kind, model_fingerprint, model_fingerprint),
         ).fetchone() is not None:
             return True
     return False

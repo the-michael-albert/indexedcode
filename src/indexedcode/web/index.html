@@ -92,6 +92,7 @@
 </header>
 <main>
   <div class="cards" id="cards"></div>
+  <div id="inference"></div>
 
   <section>
     <h2>Queued <span class="count" id="queue-count"></span></h2>
@@ -181,11 +182,37 @@ function ago(ms, nowMs) {
 const clock = ms => new Date(ms).toLocaleTimeString();
 const stamp = ms => new Date(ms).toLocaleString();
 
+function inferenceCards(status) {
+  const inf = status.inference;
+  if (!inf) return [];
+  return ["summary", "embedding"].map(stage => {
+    const s = inf.stages[stage];
+    return [s.done + " / " + s.total + (s.state === "unavailable" ? " ⚠" : ""),
+            stage === "summary" ? "summarized" : "embedded"];
+  });
+}
+
+function renderInference(status) {
+  const inf = status.inference;
+  const box = document.getElementById("inference");
+  if (!inf) return;
+  const notes = ["summary", "embedding"]
+    .filter(stage => inf.stages[stage].state === "unavailable")
+    .map(stage => el("div", { class: "empty",
+      textContent: stage + " stage unavailable: " + (inf.stages[stage].detail || "unknown reason") }));
+  if (!notes.length && !inf.complete) {
+    notes.push(el("div", { class: "empty",
+      textContent: "Structural indexing is done but summaries/embeddings are incomplete." }));
+  }
+  box.replaceChildren(...notes);
+}
+
 function renderCards(status, queue) {
   const failed = status.failures.failed_jobs + status.failures.error_files;
   const items = [
     [status.coverage.ready_files + " / " + status.coverage.known_files, "files indexed"],
     [status.coverage.indexed_entities, "searchable entities"],
+    ...inferenceCards(status),
     [queue.total, "queued jobs"],
     [status.stale_paths.length, "stale paths"],
     [failed, "failures"],
@@ -257,6 +284,7 @@ async function refresh() {
     const nowMs = queue.now_ms;
     lastOk = Date.now();
     renderCards(status, queue);
+    renderInference(status);
     renderQueue(queue, nowMs);
     renderRecent(queue, nowMs);
     const failed = status.failures.failed_jobs + status.failures.error_files;

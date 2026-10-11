@@ -6,13 +6,13 @@ IndexedCode builds a local, queryable SQLite index of a source repository. It ex
 
 The current release supports **macOS and Linux with Python 3.11 or newer**. It provides structural indexing plus symbol and lexical search without a GPU or model download. Native Windows is not yet supported because the writer lock uses POSIX file locking.
 
-Semantic search is optional. `setup`, `orchestrator serve`, `index once`, and `search` start an embedding worker by default (MLX on Apple Silicon, CPU elsewhere), embed every function and class during indexing, backfill vectors for files that are already indexed, and embed queries for `hybrid` and `semantic` search with the same model. Install the runtime you need: `pip install 'indexedcode[mlx]'` (Apple Silicon) or `pip install 'indexedcode[cpu]'`. Pass `--config indexedcode.toml` to choose another backend or model. If the worker cannot start, a warning is logged and indexing continues with symbol/lexical search only (`hybrid` then reports `semantic_unavailable`); pass `--no-embeddings` to opt out explicitly. The first run downloads the model. The core install itself includes no GPU or inference dependencies.
+Semantic search is optional. When enabled, indexing is **scan → summarize → embed**: `setup`, `orchestrator serve`, `index once`, and `search` start a summary worker and an embedding worker (MLX on Apple Silicon, CPU elsewhere); every function and class is summarized, and the generated summary (never the raw source) is what gets embedded. Raw source stays available for structural and lexical retrieval. Queries for `hybrid` and `semantic` search are embedded with the same embedding model. Files that are already indexed are backfilled: missing or outdated summaries are regenerated even when vectors exist, and vectors are recomputed whenever the summary or embedding model changes. Both stages need their runtime in the *same Python environment that runs `indexedcode`*. For a uv tool install: `uv tool install --with mlx-embeddings --with mlx-lm indexedcode` (Apple Silicon) or `uv tool install --with torch --with transformers indexedcode` (CPU); for pip, `pip install 'indexedcode[mlx]'` or `pip install 'indexedcode[cpu]'`. Pass `--config indexedcode.toml` to choose other backends or models. If either stage cannot start, a warning names the stage and the reason, indexing continues structurally (symbol/lexical search only; `hybrid` reports `semantic_unavailable`), and `GET /v1/status` plus the dashboard report `inference` per stage (state, reason, and `done`/`total` entities) so an empty queue never implies summaries and embeddings exist. Restart after installing the runtime and existing files are backfilled. Pass `--no-embeddings` to opt out explicitly. The first run downloads the models. The core install itself includes no GPU or inference dependencies.
 
 Supported source languages include Python, JavaScript, TypeScript, Go, Rust, Java, C, and C++. References are syntactic candidates, not a compiler-backed call graph.
 
 ## Install a release
 
-Wheel and source-distribution assets are published on [GitHub Releases](https://github.com/the-michael-albert/indexedcode/releases), **not PyPI**. Versioned URLs become available only after the corresponding release is published; a 404 before publication is expected. The examples pin version `1.0.0a3`; replace both version components when upgrading. CI tests Linux and macOS on Python 3.11–3.14.
+Wheel and source-distribution assets are published on [GitHub Releases](https://github.com/the-michael-albert/indexedcode/releases), **not PyPI**. Versioned URLs become available only after the corresponding release is published; a 404 before publication is expected. The examples pin version `1.0.0a4`; replace both version components when upgrading. CI tests Linux and macOS on Python 3.11–3.14.
 
 ### uv (recommended)
 
@@ -20,7 +20,7 @@ Wheel and source-distribution assets are published on [GitHub Releases](https://
 
 ```bash
 uv tool install --python 3.12 \
-  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a3/indexedcode-1.0.0a3-py3-none-any.whl
+  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a4/indexedcode-1.0.0a4-py3-none-any.whl
 ```
 
 ### pipx
@@ -29,7 +29,7 @@ With Python 3.11+ and [pipx](https://pipx.pypa.io/stable/installation/) installe
 
 ```bash
 pipx install \
-  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a3/indexedcode-1.0.0a3-py3-none-any.whl
+  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a4/indexedcode-1.0.0a4-py3-none-any.whl
 ```
 
 Both methods download Python dependencies during installation. Verify the commands are available:
@@ -139,10 +139,10 @@ Upgrade using the exact wheel URL of a **published** release and the installer t
 
 ```bash
 uv tool install --force --python 3.12 \
-  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a3/indexedcode-1.0.0a3-py3-none-any.whl
+  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a4/indexedcode-1.0.0a4-py3-none-any.whl
 # Or:
 pipx install --force \
-  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a3/indexedcode-1.0.0a3-py3-none-any.whl
+  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a4/indexedcode-1.0.0a4-py3-none-any.whl
 ```
 
 A direct URL pins a release; do not assume `uv tool upgrade` or `pipx upgrade` discovers newer GitHub assets. Check `indexedcode --version`, restart the writer, and run `status` with your root/database paths. Read release notes for rebuild requirements; cross-version database migration is not promised. To rebuild safely, retain the old database and use `index once` with a new external database path. To roll back, stop the writer, reinstall the previous wheel, and use its known-good backup at a separate path.
