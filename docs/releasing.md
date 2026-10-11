@@ -62,8 +62,8 @@ Use fresh validation environments for each release candidate. Do not use an edit
 Publishing is an explicit maintainer action. The [release workflow](../.github/workflows/release.yml) triggers on pushed `v*` tags. After approval, create a tag that exactly matches `v` plus the package metadata version:
 
 ```bash
-git tag -a v1.0.0a2 -m "IndexedCode 1.0.0a2"
-git push origin v1.0.0a2
+git tag -a v1.0.0a3 -m "IndexedCode 1.0.0a3"
+git push origin v1.0.0a3
 ```
 
 The workflow:
@@ -93,10 +93,10 @@ shasum -a 256 -c SHA256SUMS
 Test installation in a clean macOS or Linux environment, once per installer:
 
 ```bash
-uv tool install --python 3.12 https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a2/indexedcode-1.0.0a2-py3-none-any.whl
+uv tool install --python 3.12 https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a3/indexedcode-1.0.0a3-py3-none-any.whl
 uv tool update-shell
 # Or, with Python 3.11+ selected by pipx:
-pipx install https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a2/indexedcode-1.0.0a2-py3-none-any.whl
+pipx install https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a3/indexedcode-1.0.0a3-py3-none-any.whl
 pipx ensurepath
 ```
 
