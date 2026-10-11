@@ -8,6 +8,27 @@ The current release supports **macOS and Linux with Python 3.11 or newer**. It p
 
 Semantic search is optional. When enabled, indexing is **scan → summarize → embed**: `setup`, `orchestrator serve`, `index once`, and `search` start a summary worker and an embedding worker (MLX on Apple Silicon, CPU elsewhere); every function and class is summarized, and the generated summary (never the raw source) is what gets embedded. Raw source stays available for structural and lexical retrieval. Queries for `hybrid` and `semantic` search are embedded with the same embedding model. Files that are already indexed are backfilled: missing or outdated summaries are regenerated even when vectors exist, and vectors are recomputed whenever the summary or embedding model changes. Both stages need their runtime in the *same Python environment that runs `indexedcode`*, and the right one is picked and installed for you. Apple Silicon gets MLX (`mlx-lm`, `mlx-embeddings`) with the package itself. On Linux the GPU is detected at first run: **NVIDIA → CUDA** (PyTorch), **AMD → Vulkan** (llama.cpp with GGUF models; the install compiles `llama-cpp-python` and needs cmake, a C/C++ compiler, `libvulkan-dev` and `glslc`), **no GPU → CPU** (CPU-only PyTorch). The missing runtime is installed automatically the first time a summary or embedding worker starts; run `indexedcode install-runtime` to do it up front (`--backend` overrides detection), set `INDEXEDCODE_GPU=nvidia|amd|none` to override GPU detection, or `INDEXEDCODE_AUTO_INSTALL=0` to turn the automatic install off. A failed install is reported as a warning and indexing continues structurally. ROCm (`backend = \"rocm\"`) is still available but is not installed automatically. Pass `--config indexedcode.toml` to choose other backends or models. If either stage cannot start, a warning names the stage and the reason, indexing continues structurally (symbol/lexical search only; `hybrid` reports `semantic_unavailable`), and `GET /v1/status` plus the dashboard report `inference` per stage (state, reason, and `done`/`total` entities) so an empty queue never implies summaries and embeddings exist. Restart after installing the runtime and existing files are backfilled. Pass `--no-embeddings` to opt out explicitly. The first run downloads the models. The core wheel carries no CUDA/CPU/Vulkan inference dependencies; those are installed on demand as described above.
 
+### Hosted embedding and summarization APIs
+
+Local models are slow on modest hardware. To offload either stage to a hosted API, set `mode = "api"` in the file you pass with `--config`; no local runtime is installed or started for that stage. Requests run in parallel (`max_concurrent_requests`, default 8), and 429/5xx responses are retried with backoff.
+
+```toml
+[summarization]
+mode = "api"
+provider = "anthropic"            # or "openai" (any OpenAI-compatible endpoint)
+# model = "claude-haiku-5-5"      # default for anthropic; openai: gpt-4o-mini
+# api_key_env = "ANTHROPIC_API_KEY"
+
+[embedding]
+mode = "api"
+provider = "openai"               # embeddings: OpenAI-compatible only
+# model = "text-embedding-3-small"
+# base_url = "https://api.openai.com/v1"   # Voyage, Together, Ollama, vLLM, ...
+# dimensions = 512                # optional, for models that support it
+```
+
+API keys are read from environment variables (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` by default, or the variable named by `api_key_env`), never from the config file. `base_url` must be `https://` (plain `http://` only for localhost). You can mix modes, for example a hosted summarizer with a local embedder. **Entity source code is sent to the provider for summarization, and generated summaries are sent for embedding**; use local mode for code that must not leave the machine. Changing provider or model changes the fingerprint, so affected summaries and vectors are regenerated.
+
 Supported source languages include Python, JavaScript, TypeScript, Go, Rust, Java, C, and C++. References are syntactic candidates, not a compiler-backed call graph.
 
 ## Install a release

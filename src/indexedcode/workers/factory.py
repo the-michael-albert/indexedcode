@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from indexedcode.workers.adapters import worker_command
 from indexedcode.workers.client import WorkerClient
 from indexedcode.workers.fingerprint import model_fingerprint
@@ -30,11 +32,39 @@ def _expected_fingerprint(section_cfg: dict, name: str = "embedding") -> str:
     return model_fingerprint(**details)
 
 
+def _build_api_worker(name: str, section_cfg: dict):
+    from indexedcode.config import ConfigError
+    from indexedcode.workers.api import (
+        DEFAULT_KEY_ENV,
+        ApiEmbeddingClient,
+        ApiSummaryClient,
+    )
+
+    provider = section_cfg["provider"]
+    key_env = section_cfg.get("api_key_env") or DEFAULT_KEY_ENV[provider]
+    api_key = os.environ.get(key_env)
+    if not api_key:
+        raise ConfigError(
+            f"{name}: set the {key_env} environment variable to your"
+            f" {provider} API key")
+    common = dict(provider=provider, base_url=section_cfg.get("base_url"),
+                  api_key=api_key, model=section_cfg["model"])
+    if name.startswith("summar"):
+        client = ApiSummaryClient(**common)
+    else:
+        client = ApiEmbeddingClient(
+            dimensions=section_cfg.get("dimensions"), **common)
+    return RemoteWorker(name, client)
+
+
 def build_worker(name: str, section_cfg: dict):
-    """Return a ManagedWorker (managed) or RemoteWorker (remote)."""
+    """Return a ManagedWorker (managed), or a RemoteWorker handle for a
+    remote worker endpoint or a hosted API."""
     from indexedcode.config import ConfigError
 
     mode = section_cfg["mode"]
+    if mode == "api":
+        return _build_api_worker(name, section_cfg)
     fingerprint = _expected_fingerprint(section_cfg, name)
 
     if mode == "remote":

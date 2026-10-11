@@ -5,8 +5,10 @@ from __future__ import annotations
 import tomllib
 
 from indexedcode.workers.adapters import default_backend, default_model
+from indexedcode.workers.api import PROVIDERS, default_api_model
 
-MODES = ("managed", "remote")
+MODES = ("managed", "remote", "api")
+API_CONCURRENCY = 8
 BACKENDS = ("mlx", "cuda", "vulkan", "rocm", "cpu")
 
 DEFAULTS = {
@@ -19,6 +21,10 @@ DEFAULTS = {
         "max_concurrent_requests": 1,
         "remote_url": None,
         "remote_token": None,
+        "provider": None,
+        "base_url": None,
+        "api_key_env": None,
+        "dimensions": None,
     },
     "summarization": {
         "mode": "managed",
@@ -31,6 +37,9 @@ DEFAULTS = {
         "max_batch_items": 1,
         "remote_url": None,
         "remote_token": None,
+        "provider": None,
+        "base_url": None,
+        "api_key_env": None,
     },
     "memory": {
         "managed_soft_limit_mb": 2300,
@@ -71,6 +80,36 @@ class ConfigError(ValueError):
     """The configuration file is invalid."""
 
 
+def _resolve_api_section(section, cfg, given):
+    """Validate a hosted-API section and fill provider-specific defaults."""
+    provider = cfg.get("provider")
+    if provider not in PROVIDERS:
+        raise ConfigError(
+            f'{section}.mode = "api" requires provider to be one of'
+            f" {PROVIDERS}, got {provider!r}"
+        )
+    role = "summary" if section == "summarization" else "embedding"
+    if "model" not in given:
+        model = default_api_model(provider, role)
+        if model is None:
+            raise ConfigError(
+                f"{section}.provider = {provider!r} does not offer"
+                f" {role} models"
+            )
+        cfg["model"] = model
+    if "max_concurrent_requests" not in given:
+        cfg["max_concurrent_requests"] = API_CONCURRENCY
+    base_url = cfg.get("base_url")
+    if base_url and not (
+        str(base_url).startswith("https://")
+        or str(base_url).startswith(("http://localhost", "http://127.0.0.1"))
+    ):
+        raise ConfigError(
+            f"{section}.base_url must use https:// (API keys are sent as"
+            " bearer credentials); plain http is allowed for localhost only"
+        )
+
+
 def load_config(path):
     """Load and validate an indexedcode.toml file; returns plain dicts."""
     with open(path, "rb") as fh:
@@ -93,6 +132,9 @@ def load_config(path):
                 f"{section}.mode must be one of {MODES},"
                 f" got {cfg[section]['mode']!r}"
             )
+        if cfg[section]["mode"] == "api":
+            _resolve_api_section(section, cfg[section], raw.get(section, {}))
+            continue
         if cfg[section]["backend"] not in BACKENDS:
             raise ConfigError(
                 f"{section}.backend must be one of {BACKENDS},"
@@ -128,9 +170,9 @@ def load_config(path):
 
     if not allow_over_budget:
         for (section, key), limit in BUDGET_PROFILE.items():
-            # remote inference runs on another host: the managed-local
+            # remote/api inference runs on another host: the managed-local
             # budget profile does not apply and needs no opt-in
-            if cfg[section]["mode"] == "remote":
+            if cfg[section]["mode"] in ("remote", "api"):
                 continue
             if cfg[section][key] > limit:
                 raise ConfigError(
