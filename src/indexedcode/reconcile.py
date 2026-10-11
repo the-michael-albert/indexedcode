@@ -28,6 +28,7 @@ class ReconcileResult:
         self.remove_enqueued = 0
         self.unchanged = 0
         self.skipped = 0
+        self.candidates = 0
 
 
 def reconcile(conn, root, now_ms=0):
@@ -35,6 +36,7 @@ def reconcile(conn, root, now_ms=0):
     result = ReconcileResult()
     scan = scan_repository(root)
 
+    result.candidates = len(scan.files)
     seen = set()
     for skipped in scan.skipped:
         seen.add(skipped.relative_path)

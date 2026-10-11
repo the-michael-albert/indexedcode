@@ -35,6 +35,8 @@ def _reconcile_logged(conn, root, what):
     else:
         logger.debug("%s: nothing changed (%d unchanged, %d skipped)", what,
                      result.unchanged, result.skipped)
+    logger.info("%s: scanned %d candidate files, %d skipped", what,
+                result.candidates, result.skipped)
     return result
 
 
@@ -50,9 +52,10 @@ def _cmd_index_once(args) -> int:
         with WriterLock(_writer_lock_path(args.db)):
             logger.info("indexing %s", args.root)
             result = reconcile(conn, args.root)
-            logger.info("found %d to index, %d to remove, %d unchanged",
+            logger.info("found %d to index, %d to remove, %d unchanged "
+                        "(%d candidates, %d skipped)",
                         result.refresh_enqueued, result.remove_enqueued,
-                        result.unchanged)
+                        result.unchanged, result.candidates, result.skipped)
             counts = run_until_idle(conn, args.root,
                                     now_ms=int(time.time() * 1000))
             logger.info("done: %d indexed, %d removed, %d retried, %d failed",
