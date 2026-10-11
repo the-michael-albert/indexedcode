@@ -31,10 +31,15 @@ def _normalize(vector) -> list[float]:
     return [component / norm for component in vector]
 
 
+@lru_cache(maxsize=2)
+def _mlx_summary_model(model_path: str):
+    return _require("mlx_lm", "MLX").load(model_path)
+
+
 def mlx_summary(prompt: str, max_output_tokens: int = 256,
                 model_path: str = DEFAULT_SUMMARY_MODEL) -> str:
     mlx_lm = _require("mlx_lm", "MLX")
-    model, tokenizer = mlx_lm.load(model_path)
+    model, tokenizer = _mlx_summary_model(model_path)
     return mlx_lm.generate(
         model, tokenizer, prompt=prompt, max_tokens=max_output_tokens
     )
@@ -57,23 +62,33 @@ def mlx_embed(texts, model_path: str = DEFAULT_EMBED_MODEL) -> list[list[float]]
     return [_normalize(list(map(float, vector))) for vector in vectors.tolist()]
 
 
-def _torch_summary(prompt, max_output_tokens, model_path, device, backend):
+@lru_cache(maxsize=2)
+def _torch_pipeline(model_path, device, backend):
     transformers = _require("transformers", backend)
     _require("torch", backend)
-    pipeline = transformers.pipeline(
+    return transformers.pipeline(
         "text-generation", model=model_path, device=device
     )
+
+
+@lru_cache(maxsize=2)
+def _torch_embed_model(model_path, device, backend):
+    transformers = _require("transformers", backend)
+    _require("torch", backend)
+    tokenizer = transformers.AutoTokenizer.from_pretrained(model_path)
+    model = transformers.AutoModel.from_pretrained(model_path)
+    return model.to(device).eval(), tokenizer
+
+
+def _torch_summary(prompt, max_output_tokens, model_path, device, backend):
+    pipeline = _torch_pipeline(model_path, device, backend)
     result = pipeline(prompt, max_new_tokens=max_output_tokens,
                       return_full_text=False)
     return result[0]["generated_text"]
 
 
 def _torch_embed(texts, model_path, device, backend):
-    transformers = _require("transformers", backend)
-    _require("torch", backend)
-    tokenizer = transformers.AutoTokenizer.from_pretrained(model_path)
-    model = transformers.AutoModel.from_pretrained(model_path)
-    model = model.to(device).eval()
+    model, tokenizer = _torch_embed_model(model_path, device, backend)
     encoded = tokenizer(texts, padding=True, truncation=True,
                         return_tensors="pt").to(device)
     hidden = model(**encoded).last_hidden_state
@@ -163,11 +178,7 @@ def cpu_embed(texts, model_path: str = DEFAULT_EMBED_MODEL) -> list[list[float]]
 
 def cpu_summary(prompt: str, max_output_tokens: int = 256,
                 model_path: str = DEFAULT_SUMMARY_MODEL) -> str:
-    transformers = _require("transformers", "CPU")
-    _require("torch", "CPU")
-    pipeline = transformers.pipeline(
-        "text-generation", model=model_path, device="cpu"
-    )
+    pipeline = _torch_pipeline(model_path, "cpu", "CPU")
     result = pipeline(prompt, max_new_tokens=max_output_tokens,
                       return_full_text=False)
     return result[0]["generated_text"]
