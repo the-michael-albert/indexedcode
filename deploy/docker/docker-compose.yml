@@ -21,6 +21,7 @@ x-worker: &worker
     - "${RENDER_GID:-109}"
   environment:
     INDEXEDCODE_WORKER_SECRET: ${INDEXEDCODE_WORKER_SECRET:?set INDEXEDCODE_WORKER_SECRET in .env}
+    INDEXEDCODE_N_CTX: ${INDEXEDCODE_N_CTX:-4096}
   volumes:
     - models:/models
   healthcheck:
@@ -77,6 +78,24 @@ services:
     depends_on:
       - summary
       - embedding
+
+  # optional TLS front: enabled only with `--profile tls` (needs certs/ —
+  # see docs/ops/docker-vulkan.md). Publishes 8443/8444 as
+  # https://${TLS_HOST}:8443/:8444 for off-box clients.
+  tls:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    profiles: ["tls"]
+    environment:
+      TLS_HOST: ${TLS_HOST:?set TLS_HOST in .env (e.g. host.tailnet.ts.net)}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro
+    ports:
+      - "${TLS_BIND_ADDRESS:-0.0.0.0}:8443:8443"
+      - "${TLS_BIND_ADDRESS:-0.0.0.0}:8444:8444"
+    depends_on:
+      - gateway
 
 volumes:
   models:

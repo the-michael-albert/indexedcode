@@ -6,3 +6,8 @@ build/
 dist/
 *.egg-info/
 .release-check/
+
+# deploy secrets and TLS key material
+deploy/docker/.env
+deploy/docker/certs/
+deploy/docker/models-local/
