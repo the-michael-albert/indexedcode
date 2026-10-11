@@ -14,7 +14,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def test_behavioral_query_retrieves_intended_entity_top_five(tmp_path):
+def test_behavioral_query_retrieves_intended_entity_top_five(
+        tmp_path, real_semantic):
     from indexedcode.cli import main
     from indexedcode.retrieval import search
 
