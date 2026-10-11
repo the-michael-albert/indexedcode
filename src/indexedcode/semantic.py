@@ -37,8 +37,9 @@ _RUNTIME_MODULES = {
     ("cpu", "summary"): ("torch", "transformers"),
 }
 _INSTALL_HINT = {
-    "mlx": "`uv tool install --with mlx-embeddings --with mlx-lm"
-           " indexedcode` (or `pip install 'indexedcode[mlx]'`)",
+    "mlx": "`uv tool install --force --with mlx-embeddings --with mlx-lm"
+           " indexedcode` (or `pip install 'indexedcode[mlx]'`); MLX needs"
+           " Apple Silicon",
     "rocm": "`pip install torch transformers` for your ROCm build",
     "cpu": "`uv tool install --with torch --with transformers indexedcode`"
            " (or `pip install 'indexedcode[cpu]'`)",
