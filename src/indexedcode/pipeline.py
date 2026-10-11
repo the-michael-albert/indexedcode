@@ -192,8 +192,8 @@ def process_next_job(
 
     # --- changed-entity detection (§7.2.4: inference only for changes) ----
     old_hashes, old_summaries, old_index = _existing_snapshot(conn, file_row)
-    entities = [("function", fn) for fn in extracted.functions]
-    entities += [("class", cls) for cls in extracted.classes]
+    entities = [("function", fn) for fn in _last_by_qname(extracted.functions)]
+    entities += [("class", cls) for cls in _last_by_qname(extracted.classes)]
 
     # stage 1: summaries. An entity keeps its stored summary while it was
     # produced from the same source by the same summary model.
@@ -424,6 +424,13 @@ def _existing_snapshot(conn, file_row):
     return hashes, summaries, index
 
 
+def _last_by_qname(entities):
+    """Collapse same-qualified-name entities (overloads, property setters,
+    conditional redefinitions) to the last one, matching the id the publisher
+    resolves a qname to; entity_index is unique per entity id."""
+    return list({ent.qualified_name: ent for ent in entities}.values())
+
+
 def _entity_index_rows(extracted, vectors, summaries, old_index,
                        model_fingerprint):
     """One search row per function/class. Vectors are embeddings of the
@@ -432,7 +439,7 @@ def _entity_index_rows(extracted, vectors, summaries, old_index,
     rows = []
     for kind, entities in (("function", extracted.functions),
                            ("class", extracted.classes)):
-        for ent in entities:
+        for ent in _last_by_qname(entities):
             rows.append(_index_row(
                 kind, ent, vectors, summaries, old_index, model_fingerprint))
     return [row for row in rows if row is not None]

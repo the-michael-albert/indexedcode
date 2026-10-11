@@ -473,3 +473,12 @@ def test_imports_and_calls_publish_with_file_level_sources(db, repo):
     assert by_relation["imports"]["source_type"] == "file"
     assert by_relation["calls"]["source_id"] == foo_id
     assert by_relation["calls"]["source_type"] == "function"
+
+
+def test_duplicate_qualified_names_do_not_break_publish(db, repo):
+    seed_and_process(
+        db, repo,
+        "class A:\n"
+        "    @property\n    def x(self):\n        return 1\n"
+        "    @x.setter\n    def x(self, v):\n        pass\n",
+    )
