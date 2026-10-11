@@ -98,7 +98,8 @@ def test_serve_boots_reconciles_and_shuts_down(tmp_path):
 
     proc = subprocess.Popen(
         [sys.executable, "-m", "indexedcode.cli", "orchestrator", "serve",
-         "--root", str(root), "--db", str(db), "--http-port", str(port)],
+         "--root", str(root), "--db", str(db), "--http-port", str(port),
+         "--no-embeddings"],  # no model workers/downloads in this boot test
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         env={"PYTHONPATH": "src", "PATH": "/usr/bin:/bin",
              "INDEXEDCODE_AUTO_INSTALL": "0"},
