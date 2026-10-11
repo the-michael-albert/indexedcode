@@ -69,3 +69,16 @@ jobs:
           name: distributions
           path: dist/
           if-no-files-found: error
+
+  # Single stable check name for branch protection: require "CI gate" instead
+  # of the individual matrix jobs, which change when the matrix does.
+  gate:
+    name: CI gate
+    if: always()
+    needs: [tests, artifacts]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every CI job to have succeeded
+        run: |
+          [ "${{ needs.tests.result }}" = "success" ] && [ "${{ needs.artifacts.result }}" = "success" ] || {
+            echo "tests=${{ needs.tests.result }} artifacts=${{ needs.artifacts.result }}"; exit 1; }
