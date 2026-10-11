@@ -48,7 +48,7 @@ def test_model_info_rejects_bad_fingerprint_format():
 
 def test_model_info_rejects_unknown_backend():
     with pytest.raises(Exception):
-        ModelInfo(**{**VALID_MODEL, "backend": "cuda"})
+        ModelInfo(**{**VALID_MODEL, "backend": "tpu"})
 
 
 def test_embed_response_shape():

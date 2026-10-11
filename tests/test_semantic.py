@@ -54,7 +54,7 @@ def test_unknown_backend_still_refused():
 ])
 def test_default_backend_is_mlx_on_apple_silicon_else_cpu(
         system, machine, expected):
-    assert default_backend(system, machine) == expected
+    assert default_backend(system, machine, gpu="none") == expected
 
 
 def test_config_defaults_follow_platform_and_accept_cpu(tmp_path):

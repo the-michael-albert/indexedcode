@@ -18,6 +18,12 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _no_runtime_auto_install(monkeypatch):
+    monkeypatch.setenv("INDEXEDCODE_AUTO_INSTALL", "0")
+    monkeypatch.delenv("INDEXEDCODE_GPU", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_embedding_worker(monkeypatch):
     """CLI tests must not spawn a real model worker; tests that want
     semantic indexing patch ``indexedcode.cli.try_start_semantic_index``."""
