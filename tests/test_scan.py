@@ -44,6 +44,46 @@ def test_nested_gitignore_honored(repo):
     assert "gen/kept.py" in included(r)
 
 
+def test_sibling_gitignore_does_not_leak(repo):
+    (repo / "a_cache").mkdir()
+    (repo / "a_cache" / ".gitignore").write_text("*\n")
+    (repo / "a_cache" / "c.py").write_text("x = 1\n")
+    r = scan_repository(repo)
+    assert "src/main.py" in included(r)
+    assert skipped(r)["a_cache/c.py"] == "ignored"
+
+
+def test_deep_gitignore_does_not_leak_after_return(repo):
+    (repo / "a" / "b").mkdir(parents=True)
+    (repo / "a" / "b" / ".gitignore").write_text("*\n")
+    (repo / "a" / "b" / "x.py").write_text("x = 1\n")
+    (repo / "a" / "top.py").write_text("x = 1\n")
+    (repo / "z.py").write_text("x = 1\n")
+    r = scan_repository(repo)
+    assert "a/top.py" in included(r)
+    assert "z.py" in included(r)
+    assert "a/b/x.py" in skipped(r)
+
+
+def test_gitignore_in_excluded_dir_has_no_effect(repo):
+    (repo / "build").mkdir()
+    (repo / "build" / ".gitignore").write_text("*\n")
+    (repo / "build" / "o.py").write_text("x = 1\n")
+    r = scan_repository(repo)
+    assert skipped(r)["build/o.py"] == "ignored"
+    assert "src/main.py" in included(r)
+
+
+def test_deeper_negation_overrides_ancestor(repo):
+    (repo / ".gitignore").write_text("*.gen.py\n")
+    (repo / "src" / ".gitignore").write_text("!keep.gen.py\n")
+    (repo / "src" / "keep.gen.py").write_text("x = 1\n")
+    (repo / "src" / "drop.gen.py").write_text("x = 1\n")
+    r = scan_repository(repo)
+    assert "src/keep.gen.py" in included(r)
+    assert skipped(r)["src/drop.gen.py"] == "ignored"
+
+
 def test_root_gitignore_honored(repo):
     (repo / ".gitignore").write_text("*.log\nscratch/\n")
     (repo / "debug.log").write_text("x")

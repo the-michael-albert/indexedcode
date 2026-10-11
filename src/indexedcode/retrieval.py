@@ -70,7 +70,8 @@ def _decode_cursor(cursor: str) -> dict:
 
 
 def search(conn, root, query, *, mode="hybrid", limit=DEFAULT_RESULTS,
-           embedder=None, cursor=None, max_chars=DEFAULT_MAX_CHARS):
+           embedder=None, model_fingerprint=None, cursor=None,
+           max_chars=DEFAULT_MAX_CHARS):
     """Search entities by symbol, text, and/or vector similarity."""
     if not isinstance(query, str) or not query.strip():
         raise SearchError("query must be a non-empty string")
@@ -143,9 +144,12 @@ def search(conn, root, query, *, mode="hybrid", limit=DEFAULT_RESULTS,
     # semantic tier: cosine similarity over stored embeddings
     if use_semantic:
         query_vector = embedder([query])[0]
+        # only compare against vectors made by the model that embedded the query
         for row in conn.execute(
             "SELECT entity_type, entity_id, embedding, embedding_dimensions,"
             " search_text FROM entity_index"
+            " WHERE (:fp IS NULL OR model_fingerprint = :fp)",
+            {"fp": model_fingerprint},
         ):
             stored = struct.unpack(
                 f"<{row['embedding_dimensions']}f", row["embedding"],

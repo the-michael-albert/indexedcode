@@ -44,7 +44,8 @@ _PROCESS_COMMANDS = ("refresh_file", "remove_file")
 
 
 def run_until_idle(conn, root, *, embed=None, summarize=None, now_ms=0,
-                   step_ms=1000, max_iterations=10_000):
+                   step_ms=1000, max_iterations=10_000,
+                   model_fingerprint="unpinned"):
     """Process every due job (advancing past retry delays) until idle.
 
     Returns a summary dict of outcome counts. Shared by the CLI's
@@ -56,6 +57,7 @@ def run_until_idle(conn, root, *, embed=None, summarize=None, now_ms=0,
         outcome = process_next_job(
             conn, root, embed=embed, summarize=summarize, now_ms=now,
             retry_base_ms=1, retry_cap_ms=1, jitter=lambda: 0,
+            model_fingerprint=model_fingerprint,
         )
         if outcome is None:
             next_due = conn.execute(
@@ -179,13 +181,23 @@ def process_next_job(
 
     # --- changed-entity detection (§7.2.4: inference only for changes) ----
     old_hashes, old_index = _existing_snapshot(conn, file_row)
+    def needs_vector(kind, qname):
+        # backfill: with an embedder, an entity lacking a vector from the
+        # current model needs one even though its source is unchanged
+        if embed is None:
+            return False
+        old = old_index.get((kind, qname))
+        return old is None or old["model_fingerprint"] != model_fingerprint
+
     changed_functions = [
         fn for fn in extracted.functions
         if old_hashes.get(("function", fn.qualified_name)) != fn.source_hash
+        or needs_vector("function", fn.qualified_name)
     ]
     changed_classes = [
         cls for cls in extracted.classes
         if old_hashes.get(("class", cls.qualified_name)) != cls.source_hash
+        or needs_vector("class", cls.qualified_name)
     ]
     inference_texts = [fn.source for fn in changed_functions]
     inference_texts += [cls.source for cls in changed_classes]
@@ -405,6 +417,8 @@ def _index_row(entity_type, qname, source, source_hash, vectors, old_index,
         if old is not None:
             embedding = old["embedding"]
             dimensions = old["embedding_dimensions"]
+            # a retained vector keeps the identity of the model that made it
+            model_fingerprint = old["model_fingerprint"]
         else:
             embedding = None  # no inference available; omit the row
     if embedding is None:

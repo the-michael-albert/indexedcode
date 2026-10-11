@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag (vX.Y.Z); created at the triggering commit if missing
+        type: string
+        required: true
 
 permissions:
   contents: read
@@ -21,7 +27,7 @@ jobs:
       - run: python -m pip install packaging
       - id: version
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           python - <<'PY'
           import os, tomllib
@@ -59,7 +65,7 @@ jobs:
       - name: Create immutable GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.tag || github.ref_name }}
           VERSION: ${{ needs.validate-tag.outputs.version }}
           PRERELEASE: ${{ needs.validate-tag.outputs.prerelease }}
         run: |
@@ -69,5 +75,5 @@ jobs:
           fi
           flags=(--repo "$GITHUB_REPOSITORY" --draft --generate-notes --title "IndexedCode $VERSION")
           if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
-          gh release create "$TAG" "${flags[@]}" dist/*
+          gh release create "$TAG" "${flags[@]}" --target "$GITHUB_SHA" dist/*
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false

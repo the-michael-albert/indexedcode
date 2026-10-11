@@ -73,17 +73,26 @@ def _is_test_file(rel_path: str) -> bool:
 
 
 def _gitignored(rel_parts, ignore_stack) -> bool:
-    path = "/".join(rel_parts)
-    for base_len, spec in ignore_stack:
-        if len(rel_parts) <= base_len:
-            continue
-        rel = "/".join(rel_parts[base_len:]) if base_len else path
-        if spec.match_file(rel):
+    """Apply each .gitignore only beneath its owning directory.
+
+    ``ignore_stack`` holds ``(owner_parts, spec)`` pairs ordered outermost
+    first. Within one path the last matching rule wins (so a deeper negation
+    overrides an ancestor pattern), and a file under an ignored directory
+    stays ignored, as in git.
+    """
+    for end in range(1, len(rel_parts) + 1):
+        is_dir = end < len(rel_parts)
+        ignored = False
+        for owner, spec in ignore_stack:
+            n = len(owner)
+            if end <= n or tuple(rel_parts[:n]) != owner:
+                continue
+            rel = "/".join(rel_parts[n:end]) + ("/" if is_dir else "")
+            result = spec.check_file(rel)
+            if result.include is not None:
+                ignored = result.include
+        if ignored:
             return True
-        # a directory-pattern like "scratch/" ignores everything beneath it
-        for i in range(base_len + 1, len(rel_parts)):
-            if spec.match_file("/".join(rel_parts[base_len:i])):
-                return True
     return False
 
 
@@ -96,7 +105,7 @@ def scan_repository(root, max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
     excludes = DEFAULT_EXCLUDES | set(extra_excludes)
     files: list[ScannedFile] = []
     skipped: list[SkippedFile] = []
-    ignore_stack: list[tuple[int, GitIgnoreSpec]] = []
+    ignore_stack: list[tuple[tuple[str, ...], GitIgnoreSpec]] = []
 
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         abs_dir = Path(dirpath)
@@ -104,13 +113,18 @@ def scan_repository(root, max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
         dirnames.sort()
         filenames.sort()
 
-        # nested gitignore rules apply to everything beneath this directory
-        if ".gitignore" in filenames:
+        # drop rules owned by directories we have left
+        while ignore_stack and tuple(rel_parts[: len(ignore_stack[-1][0])]) != ignore_stack[-1][0]:
+            ignore_stack.pop()
+
+        # nested gitignore rules apply only beneath their owning directory;
+        # ignore files inside excluded trees never contribute rules
+        if ".gitignore" in filenames and not any(p in excludes for p in rel_parts):
             lines = (abs_dir / ".gitignore").read_text().splitlines()
             spec = GitIgnoreSpec.from_lines(
                 line for line in lines if line.strip() and not line.startswith("#")
             )
-            ignore_stack.append((len(rel_parts), spec))
+            ignore_stack.append((tuple(rel_parts), spec))
 
         for filename in filenames:
             file_parts = rel_parts + [filename]

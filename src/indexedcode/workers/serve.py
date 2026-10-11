@@ -9,6 +9,7 @@ startup, before the server accepts requests.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import sys
@@ -20,6 +21,28 @@ from indexedcode.workers.adapters import backend_available
 from indexedcode.workers.fingerprint import model_fingerprint
 
 DEFAULT_DIMENSION = 384
+
+
+_EMBED_RUNNERS = {"mlx": hardwares.mlx_embed, "rocm": hardwares.rocm_embed,
+                  "cpu": hardwares.cpu_embed}
+_SUMMARY_RUNNERS = {"mlx": hardwares.mlx_summary,
+                    "rocm": hardwares.rocm_summary,
+                    "cpu": hardwares.cpu_summary}
+
+
+def build_model_info(role, backend, model) -> dict:
+    """The model identity a worker advertises (minus its fingerprint).
+
+    Shared with the orchestrator so the expected fingerprint of a managed
+    worker is derived from exactly what the worker will report.
+    """
+    info = {"model": model, "revision": "unpinned", "backend": backend}
+    if role == "summary":
+        info["quantization"] = "default-quantized"
+    else:
+        info.update(dimension=DEFAULT_DIMENSION, pooling="mean",
+                    normalized=True)
+    return info
 
 
 def build_handler(secret, model_info, summary_fn, embed_fn):
@@ -100,19 +123,13 @@ def main(argv=None) -> int:
 
     secret = os.environ.get("INDEXEDCODE_WORKER_SECRET", "")
     summary_fn = embed_fn = None
-    info = {"model": args.model, "revision": "unpinned",
-            "backend": args.backend}
+    info = build_model_info(args.role, args.backend, args.model)
     if args.role == "summary":
-        runner = hardwares.mlx_summary if args.backend == "mlx" \
-            else hardwares.rocm_summary
-        summary_fn = runner
-        info["quantization"] = "default-quantized"
+        summary_fn = functools.partial(
+            _SUMMARY_RUNNERS[args.backend], model_path=args.model)
     else:
-        runner = hardwares.mlx_embed if args.backend == "mlx" \
-            else hardwares.rocm_embed
-        embed_fn = runner
-        info.update(dimension=DEFAULT_DIMENSION, pooling="mean",
-                    normalized=True)
+        embed_fn = functools.partial(
+            _EMBED_RUNNERS[args.backend], model_path=args.model)
     info["fingerprint"] = model_fingerprint(**info)
 
     server = LoopbackHTTPServer(

@@ -57,7 +57,7 @@ from tests.conftest import insert_file, insert_module, pack_embedding
             {"orchestrator", "embedding_worker", "summary_worker",
              "remote_embedding", "remote_summary"},
         ),
-        ("Backend", {"mlx", "rocm", "remote"}),
+        ("Backend", {"mlx", "rocm", "cpu", "remote"}),
     ],
 )
 def test_enum_members_match_sql_checks(enum, expected):

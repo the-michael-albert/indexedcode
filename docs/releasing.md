@@ -59,11 +59,13 @@ Use fresh validation environments for each release candidate. Do not use an edit
 
 ## Publish
 
-Publishing is an explicit maintainer action. The [release workflow](../.github/workflows/release.yml) triggers on pushed `v*` tags. After approval, create a tag that exactly matches `v` plus the package metadata version:
+**Automatic:** merging a PR that raises `version` in `pyproject.toml` to `main` triggers [auto-release](../.github/workflows/auto-release.yml). If no `v<version>` release or tag exists, it calls the release workflow below, which creates the tag at the merge commit only after the full CI gate passes. Merges that do not change the version do nothing. If the gate fails, fix forward and re-run the workflow; no tag was created.
+
+**Manual:** publishing can also be done by hand. The [release workflow](../.github/workflows/release.yml) triggers on pushed `v*` tags. After approval, create a tag that exactly matches `v` plus the package metadata version:
 
 ```bash
-git tag -a v1.0.0a2 -m "IndexedCode 1.0.0a2"
-git push origin v1.0.0a2
+git tag -a v1.0.0a3 -m "IndexedCode 1.0.0a3"
+git push origin v1.0.0a3
 ```
 
 The workflow:
@@ -77,7 +79,7 @@ The workflow:
 
 PEP 440 prereleases are marked as prereleases. Only the publication job has `contents: write`; other jobs are read-only. Assets are treated as **immutable**: never replace a published wheel or sdist, reuse a published version, or move its tag. This policy is enforced by refusing an existing release; it is not a claim that repository-level GitHub immutable-release settings are enabled.
 
-No workflow pushes tags automatically, and no workflow uploads to PyPI. Versioned download URLs are public only after publication.
+No workflow uploads to PyPI; the only tags created automatically are by auto-release, at the merge commit, after CI passes. Versioned download URLs are public only after publication.
 
 ## Verify the published release
 
@@ -93,10 +95,10 @@ shasum -a 256 -c SHA256SUMS
 Test installation in a clean macOS or Linux environment, once per installer:
 
 ```bash
-uv tool install --python 3.12 https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a2/indexedcode-1.0.0a2-py3-none-any.whl
+uv tool install --python 3.12 https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a3/indexedcode-1.0.0a3-py3-none-any.whl
 uv tool update-shell
 # Or, with Python 3.11+ selected by pipx:
-pipx install https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a2/indexedcode-1.0.0a2-py3-none-any.whl
+pipx install https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a3/indexedcode-1.0.0a3-py3-none-any.whl
 pipx ensurepath
 ```
 

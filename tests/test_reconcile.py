@@ -234,3 +234,22 @@ def test_unchanged_syntax_error_file_is_not_requeued_every_scan(tmp_path):
     run_until_idle(conn, str(tmp_path), now_ms=3000)
     assert conn.execute("SELECT status FROM files").fetchone()["status"] == "ready"
     conn.close()
+
+
+def test_sibling_cache_gitignore_does_not_hide_source(db, repo):
+    # regression: a '*' .gitignore in one dir used to hide unrelated files
+    write(repo, ".pytest_like/.gitignore", "*\n")
+    write(repo, ".pytest_like/junk.py", PY)
+    write(repo, "alembic/env.py", PY)
+    write(repo, "common/config.py", PY2)
+
+    result = reconcile(db, str(repo), now_ms=0)
+
+    assert result.candidates == 2  # junk.py stays ignored
+    assert result.refresh_enqueued == 2
+    run_until_idle(db, repo, FakeEmbedder())
+    ready = db.execute(
+        "SELECT folder, file FROM files WHERE status = 'ready' ORDER BY folder"
+    ).fetchall()
+    assert [(r["folder"], r["file"]) for r in ready] == [
+        ("alembic", "env.py"), ("common", "config.py")]

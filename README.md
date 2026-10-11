@@ -6,13 +6,13 @@ IndexedCode builds a local, queryable SQLite index of a source repository. It ex
 
 The current release supports **macOS and Linux with Python 3.11 or newer**. It provides structural indexing plus symbol and lexical search without a GPU or model download. Native Windows is not yet supported because the writer lock uses POSIX file locking.
 
-The repository contains experimental MLX and ROCm worker components, but the core CLI does **not** currently load `indexedcode.toml`, start those workers, or connect them to indexing and search. Adding TOML configuration does not enable inference. Consequently, `hybrid` search reports `semantic_unavailable` and falls back to symbol/lexical search. Use `--mode lexical` or `--mode symbol` for an explicit core-only mode; `--mode semantic` fails without an embedding model. The core install includes no GPU or inference dependencies.
+Semantic search is optional. `setup`, `orchestrator serve`, `index once`, and `search` start an embedding worker by default (MLX on Apple Silicon, CPU elsewhere), embed every function and class during indexing, backfill vectors for files that are already indexed, and embed queries for `hybrid` and `semantic` search with the same model. Install the runtime you need: `pip install 'indexedcode[mlx]'` (Apple Silicon) or `pip install 'indexedcode[cpu]'`. Pass `--config indexedcode.toml` to choose another backend or model. If the worker cannot start, a warning is logged and indexing continues with symbol/lexical search only (`hybrid` then reports `semantic_unavailable`); pass `--no-embeddings` to opt out explicitly. The first run downloads the model. The core install itself includes no GPU or inference dependencies.
 
 Supported source languages include Python, JavaScript, TypeScript, Go, Rust, Java, C, and C++. References are syntactic candidates, not a compiler-backed call graph.
 
 ## Install a release
 
-Wheel and source-distribution assets are published on [GitHub Releases](https://github.com/the-michael-albert/indexedcode/releases), **not PyPI**. Versioned URLs become available only after the corresponding release is published; a 404 before publication is expected. The examples pin version `1.0.0a2`; replace both version components when upgrading. CI tests Linux and macOS on Python 3.11–3.14.
+Wheel and source-distribution assets are published on [GitHub Releases](https://github.com/the-michael-albert/indexedcode/releases), **not PyPI**. Versioned URLs become available only after the corresponding release is published; a 404 before publication is expected. The examples pin version `1.0.0a3`; replace both version components when upgrading. CI tests Linux and macOS on Python 3.11–3.14.
 
 ### uv (recommended)
 
@@ -20,7 +20,7 @@ Wheel and source-distribution assets are published on [GitHub Releases](https://
 
 ```bash
 uv tool install --python 3.12 \
-  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a2/indexedcode-1.0.0a2-py3-none-any.whl
+  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a3/indexedcode-1.0.0a3-py3-none-any.whl
 ```
 
 ### pipx
@@ -29,7 +29,7 @@ With Python 3.11+ and [pipx](https://pipx.pypa.io/stable/installation/) installe
 
 ```bash
 pipx install \
-  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a2/indexedcode-1.0.0a2-py3-none-any.whl
+  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a3/indexedcode-1.0.0a3-py3-none-any.whl
 ```
 
 Both methods download Python dependencies during installation. Verify the commands are available:
@@ -139,10 +139,10 @@ Upgrade using the exact wheel URL of a **published** release and the installer t
 
 ```bash
 uv tool install --force --python 3.12 \
-  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a2/indexedcode-1.0.0a2-py3-none-any.whl
+  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a3/indexedcode-1.0.0a3-py3-none-any.whl
 # Or:
 pipx install --force \
-  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a2/indexedcode-1.0.0a2-py3-none-any.whl
+  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a3/indexedcode-1.0.0a3-py3-none-any.whl
 ```
 
 A direct URL pins a release; do not assume `uv tool upgrade` or `pipx upgrade` discovers newer GitHub assets. Check `indexedcode --version`, restart the writer, and run `status` with your root/database paths. Read release notes for rebuild requirements; cross-version database migration is not promised. To rebuild safely, retain the old database and use `index once` with a new external database path. To roll back, stop the writer, reinstall the previous wheel, and use its known-good backup at a separate path.

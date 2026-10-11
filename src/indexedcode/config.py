@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import tomllib
 
+from indexedcode.workers.adapters import default_backend
+
 MODES = ("managed", "remote")
-BACKENDS = ("mlx", "rocm")
+BACKENDS = ("mlx", "rocm", "cpu")
 
 DEFAULTS = {
     "embedding": {
         "mode": "managed",
-        "backend": "mlx",
+        "backend": default_backend(),
         "model": "sentence-transformers/all-MiniLM-L6-v2",
         "max_batch_items": 32,
         "max_batch_tokens": 4096,
@@ -20,7 +22,7 @@ DEFAULTS = {
     },
     "summarization": {
         "mode": "managed",
-        "backend": "mlx",
+        "backend": default_backend(),
         "model": "Qwen/Qwen2.5-Coder-0.5B-Instruct",
         "quantization": "recommended-backend-quantized",
         "max_input_tokens": 4096,
