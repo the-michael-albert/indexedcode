@@ -11,7 +11,7 @@ import importlib.util
 import logging
 import os
 
-from indexedcode import embeddings
+from indexedcode import embeddings, runtime_install
 from indexedcode.config import DEFAULTS, load_config
 from indexedcode.workers.client import WorkerClient
 from indexedcode.workers.factory import build_worker
@@ -31,6 +31,10 @@ SUMMARY_TIMEOUT_S = 600.0
 _RUNTIME_MODULES = {
     ("mlx", "embedding"): ("mlx_embeddings",),
     ("mlx", "summary"): ("mlx_lm",),
+    ("cuda", "embedding"): ("torch", "transformers"),
+    ("cuda", "summary"): ("torch", "transformers"),
+    ("vulkan", "embedding"): ("llama_cpp", "huggingface_hub"),
+    ("vulkan", "summary"): ("llama_cpp", "huggingface_hub"),
     ("rocm", "embedding"): ("torch", "transformers"),
     ("rocm", "summary"): ("torch", "transformers"),
     ("cpu", "embedding"): ("torch", "transformers"),
@@ -40,6 +44,10 @@ _INSTALL_HINT = {
     "mlx": "`uv tool install --force --with mlx-embeddings --with mlx-lm"
            " indexedcode` (or `pip install 'indexedcode[mlx]'`); MLX needs"
            " Apple Silicon",
+    "cuda": "`indexedcode install-runtime --backend cuda`",
+    "vulkan": "`indexedcode install-runtime --backend vulkan` (builds"
+              " llama.cpp; needs cmake, a C/C++ compiler, libvulkan-dev and"
+              " glslc)",
     "rocm": "`pip install torch transformers` for your ROCm build",
     "cpu": "`uv tool install --with torch --with transformers indexedcode`"
            " (or `pip install 'indexedcode[cpu]'`)",
@@ -66,19 +74,36 @@ class InferenceUnavailable(RuntimeError):
             if reason))
 
 
+_INSTALL_ATTEMPTED = set()
+
+
+def _missing_modules(backend, role):
+    return [m for m in _RUNTIME_MODULES.get((backend, role), ())
+            if importlib.util.find_spec(m) is None]
+
+
 def check_runtime(role, section_cfg):
     """Raise if a managed worker's runtime is missing from *this*
-    interpreter (workers run under ``sys.executable``)."""
+    interpreter (workers run under ``sys.executable``). The runtime is
+    installed automatically first unless ``INDEXEDCODE_AUTO_INSTALL=0``."""
     if section_cfg["mode"] != "managed":
         return
     backend = section_cfg["backend"]
-    missing = [m for m in _RUNTIME_MODULES.get((backend, role), ())
-               if importlib.util.find_spec(m) is None]
+    missing = _missing_modules(backend, role)
+    detail = ""
+    if (missing and backend not in _INSTALL_ATTEMPTED
+            and runtime_install.auto_install_enabled()):
+        _INSTALL_ATTEMPTED.add(backend)  # one attempt per process
+        try:
+            runtime_install.install_runtime(backend)
+        except runtime_install.RuntimeInstallError as exc:
+            detail = f"; automatic install failed: {exc}"
+        missing = _missing_modules(backend, role)
     if missing:
         raise RuntimeError(
             f"the {backend} {role} runtime is not installed in this"
             f" environment (missing: {', '.join(missing)}); install with"
-            f" {_INSTALL_HINT[backend]}")
+            f" {_INSTALL_HINT[backend]}{detail}")
 
 
 class SemanticIndex:

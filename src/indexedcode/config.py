@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import tomllib
 
-from indexedcode.workers.adapters import default_backend
+from indexedcode.workers.adapters import default_backend, default_model
 
 MODES = ("managed", "remote")
-BACKENDS = ("mlx", "rocm", "cpu")
+BACKENDS = ("mlx", "cuda", "vulkan", "rocm", "cpu")
 
 DEFAULTS = {
     "embedding": {
         "mode": "managed",
         "backend": default_backend(),
-        "model": "sentence-transformers/all-MiniLM-L6-v2",
+        "model": default_model("embedding", default_backend()),
         "max_batch_items": 32,
         "max_batch_tokens": 4096,
         "max_concurrent_requests": 1,
@@ -23,7 +23,7 @@ DEFAULTS = {
     "summarization": {
         "mode": "managed",
         "backend": default_backend(),
-        "model": "Qwen/Qwen2.5-Coder-0.5B-Instruct",
+        "model": default_model("summary", default_backend()),
         "quantization": "recommended-backend-quantized",
         "max_input_tokens": 4096,
         "max_output_tokens": 256,
@@ -80,6 +80,12 @@ def load_config(path):
     cfg = {}
     for section, defaults in DEFAULTS.items():
         cfg[section] = {**defaults, **raw.get(section, {})}
+        # an explicit backend without an explicit model gets that
+        # backend's default model (Vulkan loads GGUF files)
+        given = raw.get(section, {})
+        if "backend" in given and "model" not in given and "model" in defaults:
+            role = "summary" if section == "summarization" else "embedding"
+            cfg[section]["model"] = default_model(role, given["backend"])
 
     for section in ("embedding", "summarization"):
         if cfg[section]["mode"] not in MODES:

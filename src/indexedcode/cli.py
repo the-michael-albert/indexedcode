@@ -157,6 +157,21 @@ def _cmd_setup(args) -> int:
     return _cmd_serve(args)
 
 
+def _cmd_install_runtime(args) -> int:
+    from indexedcode import runtime_install
+    from indexedcode.workers.adapters import default_backend
+
+    backend = args.backend or default_backend()
+    print(f"installing the {backend} inference runtime...")
+    try:
+        runtime_install.install_runtime(backend)
+    except runtime_install.RuntimeInstallError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print("done")
+    return 0
+
+
 def _cmd_serve(args) -> int:
     from indexedcode.http_api import create_server
     from indexedcode.watcher import EventWatcher
@@ -323,7 +338,8 @@ def build_parser():
             "--config", default=None,
             help="indexedcode.toml selecting the summarization and embedding"
                  " backends/models"
-                 " (default: MLX on Apple Silicon, CPU elsewhere)")
+                 " (default: MLX on Apple Silicon, CUDA with an NVIDIA GPU,"
+                 " Vulkan with an AMD GPU, CPU otherwise)")
 
     sub = parser.add_subparsers(dest="group", required=True)
 
@@ -338,6 +354,15 @@ def build_parser():
     setup.add_argument("--poll-interval-s", type=float, default=5.0)
     add_semantic(setup)
     setup.set_defaults(func=_cmd_setup)
+
+    install = sub.add_parser(
+        "install-runtime",
+        help="install the inference runtime for this machine's GPU"
+             " (Apple Silicon: MLX, NVIDIA: CUDA, AMD: Vulkan, else CPU)")
+    install.add_argument(
+        "--backend", choices=("mlx", "cuda", "vulkan", "cpu"), default=None,
+        help="default: detected from this machine")
+    install.set_defaults(func=_cmd_install_runtime)
 
     orchestrator = sub.add_parser("orchestrator")
     serve = orchestrator.add_subparsers(dest="action", required=True)

@@ -36,7 +36,7 @@ METRIC_COMPONENTS = (
     "remote_embedding",
     "remote_summary",
 )
-BACKENDS_SQL = ("mlx", "rocm", "cpu", "remote")
+BACKENDS_SQL = ("mlx", "rocm", "cuda", "vulkan", "cpu", "remote")
 
 
 class _SqlEnum(str, Enum):
@@ -119,6 +119,8 @@ class MetricComponent(_SqlEnum):
 class Backend(_SqlEnum):
     MLX = "mlx"
     ROCM = "rocm"
+    CUDA = "cuda"
+    VULKAN = "vulkan"
     CPU = "cpu"
     REMOTE = "remote"
 

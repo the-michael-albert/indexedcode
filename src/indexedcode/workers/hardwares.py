@@ -12,6 +12,8 @@ from functools import lru_cache
 
 DEFAULT_SUMMARY_MODEL = "Qwen/Qwen2.5-Coder-0.5B-Instruct"
 DEFAULT_EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+DEFAULT_VULKAN_SUMMARY_MODEL = "Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF:*q8_0.gguf"
+DEFAULT_VULKAN_EMBED_MODEL = "second-state/All-MiniLM-L6-v2-Embedding-GGUF:*Q8_0.gguf"
 
 
 def _require(import_name: str, backend: str):
@@ -50,30 +52,86 @@ def mlx_embed(texts, model_path: str = DEFAULT_EMBED_MODEL) -> list[list[float]]
     return [_normalize(list(map(float, vector))) for vector in outputs]
 
 
-def rocm_summary(prompt: str, max_output_tokens: int = 256,
-                 model_path: str = DEFAULT_SUMMARY_MODEL) -> str:
-    transformers = _require("transformers", "ROCm")
-    _require("torch", "ROCm")
+def _torch_summary(prompt, max_output_tokens, model_path, device, backend):
+    transformers = _require("transformers", backend)
+    _require("torch", backend)
     pipeline = transformers.pipeline(
-        "text-generation", model=model_path, device="cuda"
+        "text-generation", model=model_path, device=device
     )
     result = pipeline(prompt, max_new_tokens=max_output_tokens,
                       return_full_text=False)
     return result[0]["generated_text"]
 
 
-def rocm_embed(texts, model_path: str = DEFAULT_EMBED_MODEL) -> list[list[float]]:
-    transformers = _require("transformers", "ROCm")
-    _require("torch", "ROCm")
+def _torch_embed(texts, model_path, device, backend):
+    transformers = _require("transformers", backend)
+    _require("torch", backend)
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_path)
     model = transformers.AutoModel.from_pretrained(model_path)
-    model = model.to("cuda").eval()
+    model = model.to(device).eval()
     encoded = tokenizer(texts, padding=True, truncation=True,
-                        return_tensors="pt").to("cuda")
+                        return_tensors="pt").to(device)
     hidden = model(**encoded).last_hidden_state
     mask = encoded["attention_mask"].unsqueeze(-1)
     pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1)
     return [_normalize(vector.tolist()) for vector in pooled]
+
+
+# PyTorch addresses ROCm GPUs as "cuda" too.
+def rocm_summary(prompt: str, max_output_tokens: int = 256,
+                 model_path: str = DEFAULT_SUMMARY_MODEL) -> str:
+    return _torch_summary(prompt, max_output_tokens, model_path,
+                          "cuda", "ROCm")
+
+
+def rocm_embed(texts, model_path: str = DEFAULT_EMBED_MODEL) -> list[list[float]]:
+    return _torch_embed(texts, model_path, "cuda", "ROCm")
+
+
+def cuda_summary(prompt: str, max_output_tokens: int = 256,
+                 model_path: str = DEFAULT_SUMMARY_MODEL) -> str:
+    return _torch_summary(prompt, max_output_tokens, model_path,
+                          "cuda", "CUDA")
+
+
+def cuda_embed(texts, model_path: str = DEFAULT_EMBED_MODEL) -> list[list[float]]:
+    return _torch_embed(texts, model_path, "cuda", "CUDA")
+
+
+@lru_cache(maxsize=2)
+def _llama_model(model_path: str, embedding: bool):
+    """Load a GGUF model with every layer offloaded to the Vulkan device.
+
+    ``model_path`` is a local ``.gguf`` file or ``repo_id:filename-glob``
+    downloaded from Hugging Face.
+    """
+    llama_cpp = _require("llama_cpp", "Vulkan")
+    options = dict(n_gpu_layers=-1, verbose=False, embedding=embedding,
+                   n_ctx=0 if embedding else 4096)
+    if model_path.endswith(".gguf"):
+        return llama_cpp.Llama(model_path=model_path, **options)
+    repo_id, _, filename = model_path.partition(":")
+    return llama_cpp.Llama.from_pretrained(
+        repo_id=repo_id, filename=filename or "*.gguf", **options)
+
+
+def vulkan_summary(prompt: str, max_output_tokens: int = 256,
+                   model_path: str = DEFAULT_VULKAN_SUMMARY_MODEL) -> str:
+    result = _llama_model(model_path, False).create_completion(
+        prompt, max_tokens=max_output_tokens)
+    return result["choices"][0]["text"]
+
+
+def vulkan_embed(texts, model_path: str = DEFAULT_VULKAN_EMBED_MODEL
+                 ) -> list[list[float]]:
+    response = _llama_model(model_path, True).create_embedding(list(texts))
+    vectors = []
+    for item in response["data"]:
+        vector = item["embedding"]
+        if vector and isinstance(vector[0], list):  # per-token: mean-pool
+            vector = [sum(column) / len(vector) for column in zip(*vector)]
+        vectors.append(_normalize(list(map(float, vector))))
+    return vectors
 
 
 @lru_cache(maxsize=2)

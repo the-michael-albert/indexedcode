@@ -24,9 +24,13 @@ DEFAULT_DIMENSION = 384
 
 
 _EMBED_RUNNERS = {"mlx": hardwares.mlx_embed, "rocm": hardwares.rocm_embed,
+                  "cuda": hardwares.cuda_embed,
+                  "vulkan": hardwares.vulkan_embed,
                   "cpu": hardwares.cpu_embed}
 _SUMMARY_RUNNERS = {"mlx": hardwares.mlx_summary,
                     "rocm": hardwares.rocm_summary,
+                    "cuda": hardwares.cuda_summary,
+                    "vulkan": hardwares.vulkan_summary,
                     "cpu": hardwares.cpu_summary}
 
 

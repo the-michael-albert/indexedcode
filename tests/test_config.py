@@ -60,7 +60,7 @@ def test_unknown_mode_rejected(tmp_path):
 
 
 def test_unknown_backend_rejected(tmp_path):
-    content = VALID_TOML.replace('backend = "mlx"', 'backend = "cuda"')
+    content = VALID_TOML.replace('backend = "mlx"', 'backend = "tpu"')
     with pytest.raises(ConfigError):
         load_config(write_config(tmp_path, content))
 
