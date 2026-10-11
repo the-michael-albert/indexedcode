@@ -128,7 +128,7 @@ def prefetch(model_path: str) -> None:
     """Download a ``repo_id:filename-glob`` GGUF model into the HF cache
     (a local ``.gguf`` path needs nothing). Lets a container fleet share one
     download instead of racing."""
-    if model_path.endswith(".gguf"):
+    if hardwares.is_local_gguf(model_path):
         return
     from huggingface_hub import snapshot_download
 

@@ -8,12 +8,23 @@ clear error instead of silently using the CPU.
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 
 DEFAULT_SUMMARY_MODEL = "Qwen/Qwen2.5-Coder-0.5B-Instruct"
 DEFAULT_EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_VULKAN_SUMMARY_MODEL = "Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF:*q8_0.gguf"
 DEFAULT_VULKAN_EMBED_MODEL = "second-state/All-MiniLM-L6-v2-Embedding-GGUF:*Q8_0.gguf"
+
+
+def is_local_gguf(model_path: str) -> bool:
+    """True for a local ``.gguf`` file, False for a ``repo_id:glob`` spec.
+
+    The two cannot be told apart by suffix: ``repo:*q8_0.gguf`` also ends
+    in ``.gguf``. A colon marks a repo spec unless the exact path exists
+    (Windows drive letters are still valid local paths).
+    """
+    return os.path.isfile(model_path) or ":" not in model_path
 
 
 def _require(import_name: str, backend: str):
@@ -111,9 +122,10 @@ def _llama_model(model_path: str, embedding: bool):
     downloaded from Hugging Face.
     """
     llama_cpp = _require("llama_cpp", "Vulkan")
+    n_ctx = int(os.environ.get("INDEXEDCODE_N_CTX", "4096"))
     options = dict(n_gpu_layers=-1, verbose=False, embedding=embedding,
-                   n_ctx=0 if embedding else 4096)
-    if model_path.endswith(".gguf"):
+                   n_ctx=0 if embedding else n_ctx)
+    if is_local_gguf(model_path):
         return llama_cpp.Llama(model_path=model_path, **options)
     repo_id, _, filename = model_path.partition(":")
     return llama_cpp.Llama.from_pretrained(
@@ -122,8 +134,15 @@ def _llama_model(model_path: str, embedding: bool):
 
 def vulkan_summary(prompt: str, max_output_tokens: int = 256,
                    model_path: str = DEFAULT_VULKAN_SUMMARY_MODEL) -> str:
-    result = _llama_model(model_path, False).create_completion(
-        prompt, max_tokens=max_output_tokens)
+    model = _llama_model(model_path, False)
+    stop = None
+    template = getattr(model, "metadata", {}).get("tokenizer.chat_template", "")
+    if "<|im_start|>" in template:  # ChatML-tuned model: needs its template
+        prompt = (f"<|im_start|>user\n{prompt}<|im_end|>\n"
+                  "<|im_start|>assistant\n")
+        stop = ["<|im_end|>"]
+    result = model.create_completion(prompt, max_tokens=max_output_tokens,
+                                     stop=stop)
     return result["choices"][0]["text"]
 
 

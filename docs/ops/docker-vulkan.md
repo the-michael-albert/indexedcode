@@ -33,6 +33,24 @@ Pool size is `SUMMARY_WORKERS` / `EMBEDDING_WORKERS` in `.env`. Resize live (the
 docker compose up -d --scale summary=6 --scale embedding=3
 ```
 
+The summarizer's context window is `INDEXEDCODE_N_CTX` (default 4096). Keep it at or below the model's trained maximum — larger windows cost GPU memory for the KV cache (roughly proportional to workers × window) and quality collapses past the trained limit.
+
+`start-workers.sh` does the whole first start (build, up, wait for health) in one command.
+
+## Custom models
+
+`SUMMARY_MODEL` / `EMBEDDING_MODEL` take a `repo_id:filename-glob` Hugging Face spec or a local `.gguf` path inside the `models` volume. To use a local file — e.g. a model only published to the Ollama registry, whose model layer is a plain GGUF you can fetch directly:
+
+```bash
+curl -sL -o my-model.gguf \
+  'https://registry.ollama.ai/v2/<user>/<model>/blobs/<layer-digest>'
+docker run --rm -v indexedcode-inference_models:/to -v "$PWD":/from \
+  alpine cp /from/my-model.gguf /to/
+# .env: SUMMARY_MODEL=/models/my-model.gguf
+```
+
+A fine-tuned summarizer only behaves if it gets the prompt format it was trained on: workers apply the GGUF's ChatML template automatically when its metadata carries one.
+
 Check the gateway: `curl -H "Authorization: Bearer $SECRET" http://127.0.0.1:8801/v1/model` returns the model identity.
 
 ## Point IndexedCode at it
@@ -61,7 +79,20 @@ If you changed `SUMMARY_MODEL` / `EMBEDDING_MODEL` in `.env`, set the same `mode
 
 ## Another machine
 
-`remote_url` must be `https://` unless it is localhost. To serve a different host, set `BIND_ADDRESS` and put a TLS-terminating proxy (Caddy, nginx, a tunnel) in front of the gateway ports; do not publish them in plain text. The bearer token travels with every request.
+`remote_url` must be `https://` unless it is localhost. The compose file ships an optional Caddy TLS front for exactly that: enable it with a real certificate and point off-box clients at it.
+
+```bash
+# simplest on a tailnet: real Let's Encrypt certs for your tailnet host
+sudo tailscale set --operator=$USER      # once, then no sudo needed
+mkdir -p certs && (cd certs && tailscale cert <host>.<tailnet>.ts.net)
+
+# .env: TLS_HOST=<host>.<tailnet>.ts.net
+docker compose --profile tls up -d
+```
+
+This publishes `https://$TLS_HOST:8443` (summary) and `:8444` (embedding); wire-format traffic is end-to-end encrypted and client machines just need tailnet membership and the same bearer token. Renew certificates by re-running `tailscale cert` before the 90-day expiry, then `docker compose exec tls caddy reload`.
+
+With any other certificate source, drop the pair into `certs/$TLS_HOST.{crt,key}` the same way. Without a tailnet, prefer a plain TLS-terminating proxy (Caddy, nginx, a tunnel) over publishing the plain-HTTP ports: the bearer token travels with every request.
 
 ## Operations
 

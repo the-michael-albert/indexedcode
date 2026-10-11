@@ -1,0 +1,20 @@
+# TLS front for the worker pools; enabled with `docker compose --profile
+# tls up -d` and configured through TLS_HOST (docker-compose.yml). Expects
+# certs/$TLS_HOST.crt and certs/$TLS_HOST.key — real certificates such as
+# the Let's Encrypt ones `tailscale cert <host>.ts.net` writes (valid for
+# the tailnet host only; client machines must be on the tailnet).
+# Renew by re-running the cert command before expiry, then
+# `docker compose exec tls caddy reload`.
+{
+	auto_https off
+}
+
+https://{$TLS_HOST}:8443 {
+	tls /certs/{$TLS_HOST}.crt /certs/{$TLS_HOST}.key
+	reverse_proxy gateway:8801
+}
+
+https://{$TLS_HOST}:8444 {
+	tls /certs/{$TLS_HOST}.crt /certs/{$TLS_HOST}.key
+	reverse_proxy gateway:8802
+}
