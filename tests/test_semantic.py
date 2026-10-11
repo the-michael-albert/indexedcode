@@ -112,8 +112,10 @@ def test_cpu_embed_mean_pools_and_normalizes(monkeypatch):
 
     monkeypatch.setattr(hardwares, "_cpu_embed_model",
                         lambda path: (Model(), Tok()))
-    assert hardwares.cpu_embed(["a", "b"]) == pytest.approx(
-        [[1.0, 0.0], [1.0, 0.0]])
+    vectors = hardwares.cpu_embed(["a", "b"])
+    assert len(vectors) == 2
+    for vector in vectors:
+        assert vector == pytest.approx([1.0, 0.0])
 
 
 # --- worker identity ---------------------------------------------------------
@@ -670,3 +672,47 @@ def test_drain_passes_embedder_and_fingerprint(db, repo):
     _drain(db, str(repo), fake)
     assert fingerprints(db) == [FP_A, FP_A]
     assert fake.summarizer.calls  # summaries came first
+
+
+def test_mlx_embed_reads_text_embeds_from_model_output(monkeypatch):
+    """mlx_embeddings.generate returns an output object, not a vector list."""
+    hardwares._mlx_embed_model.cache_clear()
+
+    class Array:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def tolist(self):
+            return self.rows
+
+        def mean(self, axis):
+            assert axis == 1
+            return Array([[sum(col) / len(col) for col in zip(*r)]
+                          for r in self.rows])
+
+    class Output:
+        def __init__(self, text_embeds=None, last_hidden_state=None):
+            self.text_embeds = text_embeds
+            self.last_hidden_state = last_hidden_state
+
+    outputs = [Output(text_embeds=Array([[3.0, 4.0], [0.0, 2.0]]))]
+
+    class FakeMlx:
+        @staticmethod
+        def generate(model, tokenizer, texts):
+            assert texts == ["a", "b"]
+            return outputs[0]
+
+    monkeypatch.setattr(hardwares, "_require", lambda name, backend: FakeMlx)
+    monkeypatch.setattr(hardwares, "_mlx_embed_model",
+                        lambda path: (object(), object()))
+    for vector, expected in zip(hardwares.mlx_embed(["a", "b"]),
+                                [[0.6, 0.8], [0.0, 1.0]]):
+        assert vector == pytest.approx(expected)
+
+    # no pooled output: mean-pool the token states
+    outputs[0] = Output(last_hidden_state=Array([[[2.0, 0.0], [4.0, 0.0]],
+                                                 [[0.0, 1.0], [0.0, 3.0]]]))
+    for vector, expected in zip(hardwares.mlx_embed(["a", "b"]),
+                                [[1.0, 0.0], [0.0, 1.0]]):
+        assert vector == pytest.approx(expected)

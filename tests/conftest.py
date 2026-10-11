@@ -32,6 +32,16 @@ def _no_real_embedding_worker(monkeypatch):
 
 
 @pytest.fixture()
+def real_semantic(monkeypatch):
+    """Undo the worker stub: CLI commands start the real summary/embedding
+    workers (used by the opt-in hardware smoke tests)."""
+    from indexedcode.semantic import try_start_semantic_index
+
+    monkeypatch.setattr("indexedcode.cli.try_start_semantic_index",
+                        try_start_semantic_index)
+
+
+@pytest.fixture()
 def db(tmp_path):
     """An initialized writer connection to a fresh database file."""
     from indexedcode.db import connect, initialize

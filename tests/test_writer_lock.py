@@ -46,7 +46,7 @@ def test_second_writer_rejected_across_processes(tmp_path):
         ],
         stdout=subprocess.PIPE,
         text=True,
-        env={"PYTHONPATH": str(__import__("pathlib").Path(__file__).resolve().parents[1] / "src"), "PATH": "/usr/bin:/bin", "HOME": "/tmp"},
+        env={"PYTHONPATH": str(__import__("pathlib").Path(__file__).resolve().parents[1] / "src"), "PATH": "/usr/bin:/bin", "HOME": "/tmp", "INDEXEDCODE_AUTO_INSTALL": "0"},
     )
     try:
         assert holder.stdout.readline().strip() == "held"

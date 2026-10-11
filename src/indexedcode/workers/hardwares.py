@@ -48,8 +48,13 @@ def _mlx_embed_model(model_path: str):
 def mlx_embed(texts, model_path: str = DEFAULT_EMBED_MODEL) -> list[list[float]]:
     mlx_embeddings = _require("mlx_embeddings", "MLX")
     model, tokenizer = _mlx_embed_model(model_path)
-    outputs = mlx_embeddings.generate(model, tokenizer, texts)
-    return [_normalize(list(map(float, vector))) for vector in outputs]
+    output = mlx_embeddings.generate(model, tokenizer, list(texts))
+    # generate() returns a BaseModelOutput, not vectors: ``text_embeds`` is the
+    # pooled sentence embedding; fall back to mean-pooling the token states.
+    vectors = getattr(output, "text_embeds", None)
+    if vectors is None:
+        vectors = getattr(output, "last_hidden_state").mean(axis=1)
+    return [_normalize(list(map(float, vector))) for vector in vectors.tolist()]
 
 
 def _torch_summary(prompt, max_output_tokens, model_path, device, backend):
