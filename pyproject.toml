@@ -1,6 +1,6 @@
 [project]
 name = "indexedcode"
-version = "1.0.0a3"
+version = "1.0.0a4"
 description = "Local repository indexing orchestrator"
 readme = "README.md"
 license = "Apache-2.0"
