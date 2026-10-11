@@ -195,7 +195,7 @@ CREATE TABLE IF NOT EXISTS metrics (
                              OR process_duration_ms >= 0),
     command               TEXT,
     backend               TEXT CHECK (backend IS NULL OR backend IN
-                             ('mlx', 'rocm', 'remote')),
+                             ('mlx', 'rocm', 'cpu', 'remote')),
     error_code            TEXT,
     detail_json           TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(detail_json)),
     CHECK (

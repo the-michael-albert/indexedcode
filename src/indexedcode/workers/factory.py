@@ -9,9 +9,15 @@ from indexedcode.workers.remote import RemoteWorker
 from indexedcode.workers.supervisor import ManagedWorker
 
 
-def _expected_fingerprint(section_cfg: dict) -> str:
+def _expected_fingerprint(section_cfg: dict, name: str = "embedding") -> str:
     if section_cfg.get("expected_fingerprint"):
         return section_cfg["expected_fingerprint"]
+    if section_cfg["mode"] == "managed":
+        from indexedcode.workers.serve import build_model_info
+
+        role = "summary" if name.startswith("summar") else "embedding"
+        return model_fingerprint(**build_model_info(
+            role, section_cfg["backend"], section_cfg["model"]))
     details = {
         "model": section_cfg["model"],
         "revision": section_cfg.get("revision", "unpinned"),
@@ -29,7 +35,7 @@ def build_worker(name: str, section_cfg: dict):
     from indexedcode.config import ConfigError
 
     mode = section_cfg["mode"]
-    fingerprint = _expected_fingerprint(section_cfg)
+    fingerprint = _expected_fingerprint(section_cfg, name)
 
     if mode == "remote":
         remote_url = section_cfg.get("remote_url")
@@ -47,7 +53,7 @@ def build_worker(name: str, section_cfg: dict):
     return ManagedWorker(
         name=name,
         command=worker_command(
-            role=name,
+            role="summary" if name.startswith("summar") else "embedding",
             backend=section_cfg["backend"],
             model_path=section_cfg["model"],
         ),

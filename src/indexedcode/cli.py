@@ -21,13 +21,15 @@ from indexedcode.db import WriterLock, connect, initialize
 from indexedcode.logs import configure_logging
 from indexedcode.pipeline import run_until_idle
 from indexedcode.reconcile import reconcile
+from indexedcode.semantic import try_start_semantic_index
 
 logger = logging.getLogger(__name__)
 
 
-def _reconcile_logged(conn, root, what):
+def _reconcile_logged(conn, root, what, model_fingerprint=None):
     """reconcile() plus one log line when it found work (or on request)."""
-    result = reconcile(conn, root, now_ms=int(time.time() * 1000))
+    result = reconcile(conn, root, now_ms=int(time.time() * 1000),
+                       model_fingerprint=model_fingerprint)
     if result.refresh_enqueued or result.remove_enqueued:
         logger.info("%s: %d to index, %d to remove, %d unchanged", what,
                     result.refresh_enqueued, result.remove_enqueued,
@@ -51,13 +53,19 @@ def _cmd_index_once(args) -> int:
     try:
         with WriterLock(_writer_lock_path(args.db)):
             logger.info("indexing %s", args.root)
-            result = reconcile(conn, args.root)
+            semantic = try_start_semantic_index(
+                args.config, enabled=args.embeddings)
+            fingerprint = semantic.fingerprint if semantic else None
+            result = reconcile(conn, args.root, model_fingerprint=fingerprint)
             logger.info("found %d to index, %d to remove, %d unchanged "
                         "(%d candidates, %d skipped)",
                         result.refresh_enqueued, result.remove_enqueued,
                         result.unchanged, result.candidates, result.skipped)
-            counts = run_until_idle(conn, args.root,
-                                    now_ms=int(time.time() * 1000))
+            try:
+                counts = _drain(conn, args.root, semantic)
+            finally:
+                if semantic is not None:
+                    semantic.stop()
             logger.info("done: %d indexed, %d removed, %d retried, %d failed",
                         counts.get("completed", 0), counts.get("removed", 0),
                         counts.get("retried", 0), counts.get("failed", 0))
@@ -78,13 +86,21 @@ def _cmd_index_once(args) -> int:
 
 def _cmd_search(args) -> int:
     conn = connect(args.db, threaded=True)
+    semantic = None
     try:
+        if args.mode in ("semantic", "hybrid"):
+            semantic = try_start_semantic_index(
+                args.config, enabled=args.embeddings)
         result = retrieval.search(
             conn, args.root, args.query, mode=args.mode, limit=args.limit,
+            embedder=semantic.embed if semantic is not None else None,
+            model_fingerprint=semantic.fingerprint if semantic else None,
         )
         print(json.dumps(result))
         return 0
     finally:
+        if semantic is not None:
+            semantic.stop()
         conn.close()
 
 
@@ -142,9 +158,17 @@ def _cmd_serve(args) -> int:
         logger.info("watching %s", args.root)
         logger.info("index database %s", args.db)
         # initial reconciliation: index the tree before accepting traffic
-        _reconcile_logged(conn, args.root, "initial scan")
-        _drain(conn, args.root)
-        logger.info("initial index ready")
+        semantic = try_start_semantic_index(
+            args.config, enabled=args.embeddings)
+
+        def fingerprint():
+            return semantic.fingerprint if semantic is not None else None
+
+        _reconcile_logged(conn, args.root, "initial scan", fingerprint())
+        _drain(conn, args.root, semantic)
+        logger.info("initial index ready (%s)",
+                    "semantic search on" if semantic is not None
+                    else "symbol/lexical only")
 
         dirty = set()
 
@@ -171,8 +195,11 @@ def _cmd_serve(args) -> int:
 
         threading.Thread(target=watch_events, daemon=True).start()
 
-        httpd = create_server(conn, args.root, token=args.http_token,
-                              port=args.http_port)
+        httpd = create_server(
+            conn, args.root, token=args.http_token, port=args.http_port,
+            embedder=semantic.embed if semantic is not None else None,
+            model_fingerprint=fingerprint(),
+        )
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         print(f"listening {httpd.base_url}", file=sys.stderr, flush=True)
         logger.info("dashboard %s/  ·  agent docs %s/llms.txt",
@@ -191,28 +218,45 @@ def _cmd_serve(args) -> int:
         try:
             while not stop.is_set():
                 now = time.monotonic()
+                if semantic is not None:
+                    try:
+                        semantic.poll()
+                    except Exception as exc:  # restart budget exhausted
+                        logger.error("embedding worker failed (%s); semantic"
+                                     " indexing stopped", exc)
+                        semantic.stop()
+                        semantic = None
                 watcher.flush(now)
                 if dirty:
                     logger.debug("%d changed path(s) from the file watcher",
                                  len(dirty))
                     dirty.clear()
-                    _reconcile_logged(conn, args.root, "change detected")
-                _drain(conn, args.root)
+                    _reconcile_logged(conn, args.root, "change detected",
+                                      fingerprint())
+                _drain(conn, args.root, semantic)
                 if now - last_reconcile >= args.poll_interval_s:
-                    _reconcile_logged(conn, args.root, "periodic scan")
+                    _reconcile_logged(conn, args.root, "periodic scan",
+                                      fingerprint())
                     last_reconcile = now
                 stop.wait(0.1)
         finally:
             httpd.shutdown()
             httpd.server_close()
+            if semantic is not None:
+                semantic.stop()
     conn.close()
     logger.info("stopped")
     return 0
 
 
-def _drain(conn, root):
+def _drain(conn, root, semantic=None):
     """Process every due job; the pipeline logs each file it handles."""
-    return run_until_idle(conn, root, now_ms=int(time.time() * 1000))
+    kwargs = {}
+    if semantic is not None:
+        kwargs = {"embed": semantic.embed,
+                  "model_fingerprint": semantic.fingerprint}
+    return run_until_idle(conn, root, now_ms=int(time.time() * 1000),
+                          **kwargs)
 
 
 def _writer_lock_path(db_path):
@@ -252,6 +296,15 @@ def build_parser():
         sub.add_argument("--root", default=".")
         sub.add_argument("--db", default="index.sqlite")
 
+    def add_semantic(sub):
+        sub.add_argument(
+            "--no-embeddings", dest="embeddings", action="store_false",
+            help="skip the embedding worker: symbol/lexical search only")
+        sub.add_argument(
+            "--config", default=None,
+            help="indexedcode.toml selecting the embedding backend/model"
+                 " (default: MLX on Apple Silicon, CPU elsewhere)")
+
     sub = parser.add_subparsers(dest="group", required=True)
 
     setup = sub.add_parser(
@@ -263,6 +316,7 @@ def build_parser():
     setup.add_argument("--http-token", default=None)
     setup.add_argument("--debounce-s", type=float, default=0.25)
     setup.add_argument("--poll-interval-s", type=float, default=5.0)
+    add_semantic(setup)
     setup.set_defaults(func=_cmd_setup)
 
     orchestrator = sub.add_parser("orchestrator")
@@ -273,12 +327,14 @@ def build_parser():
     serve_parser.add_argument("--http-token", default=None)
     serve_parser.add_argument("--debounce-s", type=float, default=0.25)
     serve_parser.add_argument("--poll-interval-s", type=float, default=5.0)
+    add_semantic(serve_parser)
     serve_parser.set_defaults(func=_cmd_serve)
 
     index = sub.add_parser("index")
     once = index.add_subparsers(dest="action", required=True)
     once_parser = once.add_parser("once")
     add_common(once_parser)
+    add_semantic(once_parser)
     once_parser.set_defaults(func=_cmd_index_once)
 
     search = sub.add_parser("search")
@@ -286,6 +342,7 @@ def build_parser():
     add_common(search)
     search.add_argument("--mode", default="hybrid")
     search.add_argument("--limit", type=int, default=5)
+    add_semantic(search)
     search.set_defaults(func=_cmd_search)
 
     context = sub.add_parser("context")

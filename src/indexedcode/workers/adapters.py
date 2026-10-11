@@ -1,7 +1,8 @@
 """Backend resolution and worker command building (plan §3, §4).
 
 Managed MLX workers run only on Apple Silicon/macOS; managed ROCm workers
-only on a compatible AMD/Linux host with HIP available. ROCm is refused
+only on a compatible AMD/Linux host with HIP available. The CPU backend
+runs anywhere. ROCm is refused
 when requested but unavailable — never a silent CPU fallback. The worker
 authentication secret travels via environment, never via argv.
 """
@@ -49,7 +50,19 @@ def backend_available(
                 " refusing to fall back to CPU"
             )
         return True
+    if backend == "cpu":
+        return True
     raise BackendUnavailableError(f"unknown backend {backend!r}")
+
+
+def default_backend(system: str | None = None,
+                    machine: str | None = None) -> str:
+    """MLX on Apple Silicon macOS, the portable CPU backend elsewhere."""
+    system = system if system is not None else platform.system().lower()
+    machine = machine if machine is not None else platform.machine().lower()
+    if system == "darwin" and machine in ("arm64", "aarch64"):
+        return "mlx"
+    return "cpu"
 
 
 def worker_command(role: str, backend: str, port: int | None = None,

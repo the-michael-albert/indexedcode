@@ -8,6 +8,8 @@ clear error instead of silently using the CPU.
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 DEFAULT_SUMMARY_MODEL = "Qwen/Qwen2.5-Coder-0.5B-Instruct"
 DEFAULT_EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
@@ -36,9 +38,14 @@ def mlx_summary(prompt: str, max_output_tokens: int = 256,
     )
 
 
+@lru_cache(maxsize=2)
+def _mlx_embed_model(model_path: str):
+    return _require("mlx_embeddings", "MLX").load(model_path)
+
+
 def mlx_embed(texts, model_path: str = DEFAULT_EMBED_MODEL) -> list[list[float]]:
     mlx_embeddings = _require("mlx_embeddings", "MLX")
-    model, tokenizer = mlx_embeddings.load(model_path)
+    model, tokenizer = _mlx_embed_model(model_path)
     outputs = mlx_embeddings.generate(model, tokenizer, texts)
     return [_normalize(list(map(float, vector))) for vector in outputs]
 
@@ -66,3 +73,36 @@ def rocm_embed(texts, model_path: str = DEFAULT_EMBED_MODEL) -> list[list[float]
     mask = encoded["attention_mask"].unsqueeze(-1)
     pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1)
     return [_normalize(vector.tolist()) for vector in pooled]
+
+
+@lru_cache(maxsize=2)
+def _cpu_embed_model(model_path: str):
+    transformers = _require("transformers", "CPU")
+    _require("torch", "CPU")
+    tokenizer = transformers.AutoTokenizer.from_pretrained(model_path)
+    model = transformers.AutoModel.from_pretrained(model_path).eval()
+    return model, tokenizer
+
+
+def cpu_embed(texts, model_path: str = DEFAULT_EMBED_MODEL) -> list[list[float]]:
+    """Mean-pooled, normalized embeddings computed on the CPU."""
+    torch = _require("torch", "CPU")
+    model, tokenizer = _cpu_embed_model(model_path)
+    encoded = tokenizer(texts, padding=True, truncation=True,
+                        return_tensors="pt")
+    with torch.no_grad():
+        hidden = model(**encoded).last_hidden_state
+    mask = encoded["attention_mask"].unsqueeze(-1)
+    pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1)
+    return [_normalize(vector.tolist()) for vector in pooled]
+
+
+def cpu_summary(prompt: str, max_output_tokens: int = 256,
+                model_path: str = DEFAULT_SUMMARY_MODEL) -> str:
+    transformers = _require("transformers", "CPU")
+    _require("torch", "CPU")
+    pipeline = transformers.pipeline(
+        "text-generation", model=model_path, device="cpu"
+    )
+    result = pipeline(prompt, max_new_tokens=max_output_tokens)
+    return result[0]["generated_text"]

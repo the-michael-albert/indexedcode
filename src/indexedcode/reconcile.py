@@ -31,8 +31,12 @@ class ReconcileResult:
         self.candidates = 0
 
 
-def reconcile(conn, root, now_ms=0):
-    """Bring the store's pending work in line with the on-disk tree."""
+def reconcile(conn, root, now_ms=0, model_fingerprint=None):
+    """Bring the store's pending work in line with the on-disk tree.
+
+    With ``model_fingerprint`` set, ready files whose entities lack a
+    vector from that model are re-queued too (embedding backfill).
+    """
     result = ReconcileResult()
     scan = scan_repository(root)
 
@@ -83,6 +87,12 @@ def reconcile(conn, root, now_ms=0):
                 and row["observed_size_bytes"] == stat.st_size
             )
             if cheap_match:
+                if _needs_backfill(conn, row, model_fingerprint):
+                    _enqueue_refresh(
+                        conn, row, stat, row["indexed_hash"], now_ms,
+                        candidate.language, candidate.is_test)
+                    result.refresh_enqueued += 1
+                    continue
                 result.unchanged += 1
                 continue
             try:
@@ -91,6 +101,11 @@ def reconcile(conn, root, now_ms=0):
                 result.skipped += 1
                 continue
             if digest == row["indexed_hash"]:
+                if _needs_backfill(conn, row, model_fingerprint):
+                    _enqueue_refresh(conn, row, stat, digest, now_ms,
+                                     candidate.language, candidate.is_test)
+                    result.refresh_enqueued += 1
+                    continue
                 _observe(conn, row, stat, digest, now_ms)
                 result.unchanged += 1
                 continue
@@ -112,6 +127,21 @@ def reconcile(conn, root, now_ms=0):
 
     _enqueue_removals(conn, seen, result, now_ms)
     return result
+
+
+def _needs_backfill(conn, row, model_fingerprint):
+    """True when a ready file has an entity without a current-model vector."""
+    if model_fingerprint is None:
+        return False
+    for table, kind in (("functions", "function"), ("classes", "class")):
+        if conn.execute(
+            f"SELECT 1 FROM {table} t WHERE t.file_id = ? AND NOT EXISTS ("
+            " SELECT 1 FROM entity_index e WHERE e.entity_type = ?"
+            " AND e.entity_id = t.id AND e.model_fingerprint = ?) LIMIT 1",
+            (row["id"], kind, model_fingerprint),
+        ).fetchone() is not None:
+            return True
+    return False
 
 
 def _observe(conn, row, stat, digest, now_ms):

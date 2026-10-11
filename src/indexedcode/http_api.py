@@ -30,8 +30,13 @@ def _load_web(name: str) -> bytes:
 
 def create_server(conn, root, token=None, host="127.0.0.1", port=0,
                   max_request_bytes=MAX_REQUEST_BYTES,
-                  max_response_chars=retrieval.DEFAULT_MAX_CHARS):
-    """Build a ready-to-run HTTP server bound to a loopback port."""
+                  max_response_chars=retrieval.DEFAULT_MAX_CHARS,
+                  embedder=None, model_fingerprint=None):
+    """Build a ready-to-run HTTP server bound to a loopback port.
+
+    ``embedder`` (texts -> vectors) enables semantic and hybrid search;
+    ``model_fingerprint`` limits semantic matching to that model's vectors.
+    """
     if host not in ("127.0.0.1", "localhost", "::1") and not token:
         raise ValueError(
             "non-loopback binds require a bearer token (encrypted"
@@ -124,6 +129,8 @@ def create_server(conn, root, token=None, host="127.0.0.1", port=0,
                         mode=request.get("mode", "hybrid"),
                         limit=request.get("limit",
                                           retrieval.DEFAULT_RESULTS),
+                        embedder=embedder,
+                        model_fingerprint=model_fingerprint,
                         cursor=request.get("cursor"),
                         max_chars=max_response_chars,
                     )
