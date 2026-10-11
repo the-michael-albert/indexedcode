@@ -112,8 +112,10 @@ def test_cpu_embed_mean_pools_and_normalizes(monkeypatch):
 
     monkeypatch.setattr(hardwares, "_cpu_embed_model",
                         lambda path: (Model(), Tok()))
-    assert hardwares.cpu_embed(["a", "b"]) == pytest.approx(
-        [[1.0, 0.0], [1.0, 0.0]])
+    vectors = hardwares.cpu_embed(["a", "b"])
+    assert len(vectors) == 2
+    for vector in vectors:
+        assert vector == pytest.approx([1.0, 0.0])
 
 
 # --- worker identity ---------------------------------------------------------
