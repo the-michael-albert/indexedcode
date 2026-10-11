@@ -27,6 +27,39 @@ def is_local_gguf(model_path: str) -> bool:
     return os.path.isfile(model_path) or ":" not in model_path
 
 
+_TRUNCATION_MARKER = (
+    "\n... [{} tokens removed from the middle to fit the context window]"
+    " ...\n")
+
+
+def _middle_cut_bounds(n_tokens: int, budget: int,
+                       marker_tokens: int) -> tuple[int, int]:
+    """(head, tail) token counts whose total fits ``budget`` next to the
+    marker. Head keeps the extra token on odd budgets."""
+    keep = max(0, budget - marker_tokens)
+    head = (keep + 1) // 2
+    return head, keep - head
+
+
+def _fit_context(model, prompt: str, max_output_tokens: int) -> str:
+    """Trim ``prompt`` to the model's context window, middle-out.
+
+    Oversized sources keep their beginning and end (imports and setup at
+    the top, returns at the bottom) instead of failing the request; the
+    marker tells the model what happened to the middle.
+    """
+    budget = model.n_ctx() - max_output_tokens - 64  # chat template + slack
+    ids = model.tokenize(prompt.encode("utf-8"))
+    if len(ids) <= budget:
+        return prompt
+    marker = _TRUNCATION_MARKER.format(len(ids) - budget)
+    marker_ids = model.tokenize(marker.encode("utf-8"))
+    head, tail = _middle_cut_bounds(len(ids), budget, len(marker_ids))
+    trimmed = (model.detokenize(ids[:head]) + marker.encode("utf-8")
+               + model.detokenize(ids[len(ids) - tail:]))
+    return trimmed.decode("utf-8", errors="replace")
+
+
 def _require(import_name: str, backend: str):
     try:
         return __import__(import_name)
@@ -135,6 +168,7 @@ def _llama_model(model_path: str, embedding: bool):
 def vulkan_summary(prompt: str, max_output_tokens: int = 256,
                    model_path: str = DEFAULT_VULKAN_SUMMARY_MODEL) -> str:
     model = _llama_model(model_path, False)
+    prompt = _fit_context(model, prompt, max_output_tokens)
     stop = None
     template = getattr(model, "metadata", {}).get("tokenizer.chat_template", "")
     if "<|im_start|>" in template:  # ChatML-tuned model: needs its template
