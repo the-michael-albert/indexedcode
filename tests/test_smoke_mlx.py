@@ -28,11 +28,13 @@ def test_mlx_summary_smoke():
 def test_mlx_embedding_smoke():
     from indexedcode.embeddings import validate
     from indexedcode.workers.hardwares import mlx_embed
+    from indexedcode.workers.serve import DEFAULT_DIMENSION
 
     vectors = mlx_embed(["def add(a, b):", "class Foo:"])
     assert len(vectors) == 2
     for vector in vectors:
-        assert validate(vector)  # dimension/finite/nonzero/unit-norm
+        # finite, nonzero, unit-norm, and the dimension the worker advertises
+        validate(vector, DEFAULT_DIMENSION, tolerance=1e-4)
 
 
 def test_mlx_end_to_end_summarize_then_embed(tmp_path, real_semantic):
