@@ -1,0 +1,82 @@
+# Summarization + embedding worker pools on a Vulkan GPU (AMD/Intel, Linux).
+#
+#   cp .env.example .env     # set INDEXEDCODE_WORKER_SECRET
+#   docker compose up -d --build
+#
+# Each pool is N identical worker containers behind a HAProxy gateway that
+# balances by least-connections and only routes to workers that finished
+# loading their model. See docs/ops/docker-vulkan.md.
+name: indexedcode-inference
+
+x-worker: &worker
+  build:
+    context: ../..
+    dockerfile: deploy/docker/Dockerfile
+  image: indexedcode-worker-vulkan:local
+  restart: unless-stopped
+  devices:
+    - /dev/dri:/dev/dri
+  group_add:
+    - "${VIDEO_GID:-44}"
+    - "${RENDER_GID:-109}"
+  environment:
+    INDEXEDCODE_WORKER_SECRET: ${INDEXEDCODE_WORKER_SECRET:?set INDEXEDCODE_WORKER_SECRET in .env}
+  volumes:
+    - models:/models
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+    interval: 10s
+    timeout: 5s
+    retries: 6
+    start_period: 120s
+
+services:
+  # one-shot: download both models once so replicas don't race on the cache
+  models:
+    <<: *worker
+    restart: "no"
+    entrypoint: ["sh", "-c"]
+    command:
+      - >
+        python -m indexedcode.workers.serve --role summary --backend vulkan --model "$$SUMMARY_MODEL" --prefetch &&
+        python -m indexedcode.workers.serve --role embedding --backend vulkan --model "$$EMBEDDING_MODEL" --prefetch
+    environment:
+      INDEXEDCODE_WORKER_SECRET: unused
+      SUMMARY_MODEL: ${SUMMARY_MODEL:-Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF:*q8_0.gguf}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-second-state/All-MiniLM-L6-v2-Embedding-GGUF:*Q8_0.gguf}
+    healthcheck:
+      disable: true
+
+  summary:
+    <<: *worker
+    command: ["--role", "summary", "--model", "${SUMMARY_MODEL:-Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF:*q8_0.gguf}"]
+    depends_on:
+      models:
+        condition: service_completed_successfully
+    deploy:
+      replicas: ${SUMMARY_WORKERS:-3}
+
+  embedding:
+    <<: *worker
+    command: ["--role", "embedding", "--model", "${EMBEDDING_MODEL:-second-state/All-MiniLM-L6-v2-Embedding-GGUF:*Q8_0.gguf}"]
+    depends_on:
+      models:
+        condition: service_completed_successfully
+    deploy:
+      replicas: ${EMBEDDING_WORKERS:-2}
+
+  gateway:
+    image: haproxy:2.9-alpine
+    restart: unless-stopped
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      # loopback by default; set BIND_ADDRESS=0.0.0.0 only behind TLS
+      - "${BIND_ADDRESS:-127.0.0.1}:${SUMMARY_PORT:-8801}:8801"
+      - "${BIND_ADDRESS:-127.0.0.1}:${EMBEDDING_PORT:-8802}:8802"
+    depends_on:
+      - summary
+      - embedding
+
+volumes:
+  models:

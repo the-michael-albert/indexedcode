@@ -8,11 +8,36 @@ The current release supports **macOS and Linux with Python 3.11 or newer**. It p
 
 Semantic search is optional. When enabled, indexing is **scan → summarize → embed**: `setup`, `orchestrator serve`, `index once`, and `search` start a summary worker and an embedding worker (MLX on Apple Silicon, CPU elsewhere); every function and class is summarized, and the generated summary (never the raw source) is what gets embedded. Raw source stays available for structural and lexical retrieval. Queries for `hybrid` and `semantic` search are embedded with the same embedding model. Files that are already indexed are backfilled: missing or outdated summaries are regenerated even when vectors exist, and vectors are recomputed whenever the summary or embedding model changes. Both stages need their runtime in the *same Python environment that runs `indexedcode`*, and the right one is picked and installed for you. Apple Silicon gets MLX (`mlx-lm`, `mlx-embeddings`) with the package itself. On Linux the GPU is detected at first run: **NVIDIA → CUDA** (PyTorch), **AMD → Vulkan** (llama.cpp with GGUF models; the install compiles `llama-cpp-python` and needs cmake, a C/C++ compiler, `libvulkan-dev` and `glslc`), **no GPU → CPU** (CPU-only PyTorch). The missing runtime is installed automatically the first time a summary or embedding worker starts; run `indexedcode install-runtime` to do it up front (`--backend` overrides detection), set `INDEXEDCODE_GPU=nvidia|amd|none` to override GPU detection, or `INDEXEDCODE_AUTO_INSTALL=0` to turn the automatic install off. A failed install is reported as a warning and indexing continues structurally. ROCm (`backend = \"rocm\"`) is still available but is not installed automatically. Pass `--config indexedcode.toml` to choose other backends or models. If either stage cannot start, a warning names the stage and the reason, indexing continues structurally (symbol/lexical search only; `hybrid` reports `semantic_unavailable`), and `GET /v1/status` plus the dashboard report `inference` per stage (state, reason, and `done`/`total` entities) so an empty queue never implies summaries and embeddings exist. Restart after installing the runtime and existing files are backfilled. Pass `--no-embeddings` to opt out explicitly. The first run downloads the models. The core wheel carries no CUDA/CPU/Vulkan inference dependencies; those are installed on demand as described above.
 
+### Hosted embedding and summarization APIs
+
+Local models are slow on modest hardware. To offload either stage to a hosted API, set `mode = "api"` in the file you pass with `--config`; no local runtime is installed or started for that stage. Requests run in parallel (`max_concurrent_requests`, default 8), and 429/5xx responses are retried with backoff.
+
+```toml
+[summarization]
+mode = "api"
+provider = "anthropic"            # or "openai" (any OpenAI-compatible endpoint)
+# model = "claude-haiku-5-5"      # default for anthropic; openai: gpt-4o-mini
+# api_key_env = "ANTHROPIC_API_KEY"
+
+[embedding]
+mode = "api"
+provider = "openai"               # embeddings: OpenAI-compatible only
+# model = "text-embedding-3-small"
+# base_url = "https://api.openai.com/v1"   # Voyage, Together, Ollama, vLLM, ...
+# dimensions = 512                # optional, for models that support it
+```
+
+API keys are read from environment variables (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` by default, or the variable named by `api_key_env`); `indexedcode setup` can instead save a key as `api_key` in an owner-only `indexedcode.toml` next to the index database. `base_url` must be `https://` (plain `http://` only for localhost). You can mix modes, for example a hosted summarizer with a local embedder. **Entity source code is sent to the provider for summarization, and generated summaries are sent for embedding**; use local mode for code that must not leave the machine. Changing provider or model changes the fingerprint, so affected summaries and vectors are regenerated.
+
+### Worker pools in Docker (Vulkan)
+
+For an AMD/Intel GPU box, `deploy/docker/docker-compose.yml` runs the summarization and embedding services as scalable pools of workers behind a least-connections gateway; see [docs/ops/docker-vulkan.md](docs/ops/docker-vulkan.md). Quick start: `cd deploy/docker && cp .env.example .env` (set the token), then `docker compose up -d --build`. `indexedcode setup` has a switch for semantic search and, per stage, a choice of local models, the remote worker pool (URL and token) or a hosted API (provider, URL, key, model, parallel requests).
+
 Supported source languages include Python, JavaScript, TypeScript, Go, Rust, Java, C, and C++. References are syntactic candidates, not a compiler-backed call graph.
 
 ## Install a release
 
-Wheel and source-distribution assets are published on [GitHub Releases](https://github.com/the-michael-albert/indexedcode/releases), **not PyPI**. Versioned URLs become available only after the corresponding release is published; a 404 before publication is expected. The examples pin version `1.0.0a5`; replace both version components when upgrading. CI tests Linux and macOS on Python 3.11–3.14.
+Wheel and source-distribution assets are published on [GitHub Releases](https://github.com/the-michael-albert/indexedcode/releases), **not PyPI**. Versioned URLs become available only after the corresponding release is published; a 404 before publication is expected. The examples pin version `1.0.0a6`; replace both version components when upgrading. CI tests Linux and macOS on Python 3.11–3.14.
 
 ### uv (recommended)
 
@@ -20,7 +45,7 @@ Wheel and source-distribution assets are published on [GitHub Releases](https://
 
 ```bash
 uv tool install --python 3.12 \
-  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a5/indexedcode-1.0.0a5-py3-none-any.whl
+  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a6/indexedcode-1.0.0a6-py3-none-any.whl
 ```
 
 ### pipx
@@ -29,7 +54,7 @@ With Python 3.11+ and [pipx](https://pipx.pypa.io/stable/installation/) installe
 
 ```bash
 pipx install \
-  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a5/indexedcode-1.0.0a5-py3-none-any.whl
+  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a6/indexedcode-1.0.0a6-py3-none-any.whl
 ```
 
 Both methods download Python dependencies during installation. Verify the commands are available:
@@ -139,10 +164,10 @@ Upgrade using the exact wheel URL of a **published** release and the installer t
 
 ```bash
 uv tool install --force --python 3.12 \
-  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a5/indexedcode-1.0.0a5-py3-none-any.whl
+  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a6/indexedcode-1.0.0a6-py3-none-any.whl
 # Or:
 pipx install --force \
-  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a5/indexedcode-1.0.0a5-py3-none-any.whl
+  https://github.com/the-michael-albert/indexedcode/releases/download/v1.0.0a6/indexedcode-1.0.0a6-py3-none-any.whl
 ```
 
 A direct URL pins a release; do not assume `uv tool upgrade` or `pipx upgrade` discovers newer GitHub assets. Check `indexedcode --version`, restart the writer, and run `status` with your root/database paths. Read release notes for rebuild requirements; cross-version database migration is not promised. To rebuild safely, retain the old database and use `index once` with a new external database path. To roll back, stop the writer, reinstall the previous wheel, and use its known-good backup at a separate path.

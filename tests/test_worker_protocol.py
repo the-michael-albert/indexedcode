@@ -64,3 +64,42 @@ def test_summary_response_shape():
         summary="a summary", fingerprint="sha256:" + "d" * 64
     )
     assert response.summary == "a summary"
+
+
+def _serve_handler(secret="s"):
+    import threading
+    from http.server import HTTPServer
+
+    from indexedcode.workers.serve import build_handler
+
+    info = {"fingerprint": "sha256:" + "0" * 64}
+    server = HTTPServer(("127.0.0.1", 0), build_handler(
+        secret, info, lambda p, n: "sum", lambda texts: [[1.0]] * len(texts)))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def test_healthz_is_unauthenticated_but_everything_else_is_not():
+    import urllib.error
+    import urllib.request
+
+    server = _serve_handler()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        assert urllib.request.urlopen(base + "/healthz").status == 200
+        with pytest.raises(urllib.error.HTTPError) as err:
+            urllib.request.urlopen(base + "/v1/model")
+        assert err.value.code == 401
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_worker_refuses_public_bind_without_secret(monkeypatch):
+    from indexedcode.workers import serve
+
+    monkeypatch.delenv("INDEXEDCODE_WORKER_SECRET", raising=False)
+    monkeypatch.setattr(serve, "backend_available", lambda backend: True)
+    with pytest.raises(SystemExit):
+        serve.main(["--role", "embedding", "--backend", "cpu",
+                    "--model", "m", "--host", "0.0.0.0"])

@@ -4,6 +4,11 @@ Serves the plan §4.2–4.4 contract on a private loopback port with bearer
 authentication (both delivered via environment by the supervisor). Model
 inference is delegated to the hardware adapters; weights load once at
 startup, before the server accepts requests.
+
+Container deployments (``deploy/docker``) bind ``--host 0.0.0.0``; that
+requires a non-empty ``INDEXEDCODE_WORKER_SECRET``. Inference is serialized
+within one process (llama.cpp contexts are not thread-safe): scale out with
+more worker processes behind a load balancer instead.
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ import functools
 import json
 import os
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler
 
 from indexedcode.httpserver import LoopbackHTTPServer
@@ -50,6 +56,8 @@ def build_model_info(role, backend, model) -> dict:
 
 
 def build_handler(secret, model_info, summary_fn, embed_fn):
+    inference_lock = threading.Lock()
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
@@ -66,6 +74,8 @@ def build_handler(secret, model_info, summary_fn, embed_fn):
             return self.headers.get("Authorization") == f"Bearer {secret}"
 
         def do_GET(self):
+            if self.path == "/healthz":  # liveness only; reveals nothing
+                return self._send(200, {"ok": True})
             if not self._authed():
                 return self._send(401, {"error": "unauthorized"})
             if self.path == "/v1/model":
@@ -83,18 +93,21 @@ def build_handler(secret, model_info, summary_fn, embed_fn):
             length = int(self.headers.get("Content-Length", 0))
             request = json.loads(self.rfile.read(length) or b"{}")
             if self.path == "/v1/embed" and embed_fn is not None:
-                vectors = embed_fn(request.get("texts", []))
+                with inference_lock:
+                    vectors = embed_fn(request.get("texts", []))
                 return self._send(200, {
                     "vectors": vectors,
                     "dimension": len(vectors[0]) if vectors else 0,
                     "fingerprint": model_info["fingerprint"],
                 })
             if self.path == "/v1/summarize" and summary_fn is not None:
-                return self._send(200, {
-                    "summary": summary_fn(
+                with inference_lock:
+                    summary = summary_fn(
                         request.get("prompt", ""),
                         request.get("max_output_tokens", 256),
-                    ),
+                    )
+                return self._send(200, {
+                    "summary": summary,
                     "fingerprint": model_info["fingerprint"],
                 })
             return self._send(404, {"error": "not found"})
@@ -111,6 +124,18 @@ def _rss_mb() -> float:
         return 0.0
 
 
+def prefetch(model_path: str) -> None:
+    """Download a ``repo_id:filename-glob`` GGUF model into the HF cache
+    (a local ``.gguf`` path needs nothing). Lets a container fleet share one
+    download instead of racing."""
+    if model_path.endswith(".gguf"):
+        return
+    from huggingface_hub import snapshot_download
+
+    repo_id, _, pattern = model_path.partition(":")
+    snapshot_download(repo_id, allow_patterns=[pattern or "*.gguf"])
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--role", choices=("embedding", "summary"),
@@ -120,12 +145,26 @@ def main(argv=None) -> int:
                         default=int(os.environ.get(
                             "INDEXEDCODE_WORKER_PORT", "0")))
     parser.add_argument("--model", required=True)
+    parser.add_argument("--host", default=os.environ.get(
+        "INDEXEDCODE_WORKER_HOST", "127.0.0.1"))
+    parser.add_argument("--warmup", action="store_true",
+                        help="load the model before accepting requests"
+                             " (so a pool never routes to a cold worker)")
+    parser.add_argument("--prefetch", action="store_true",
+                        help="download the model and exit")
     args = parser.parse_args(argv)
+
+    if args.prefetch:
+        prefetch(args.model)
+        return 0
 
     # refuse startup on an incompatible backend before loading anything
     backend_available(args.backend)
 
     secret = os.environ.get("INDEXEDCODE_WORKER_SECRET", "")
+    if args.host not in ("127.0.0.1", "localhost", "::1") and not secret:
+        parser.error("binding a non-loopback --host requires"
+                     " INDEXEDCODE_WORKER_SECRET")
     summary_fn = embed_fn = None
     info = build_model_info(args.role, args.backend, args.model)
     if args.role == "summary":
@@ -135,9 +174,14 @@ def main(argv=None) -> int:
         embed_fn = functools.partial(
             _EMBED_RUNNERS[args.backend], model_path=args.model)
     info["fingerprint"] = model_fingerprint(**info)
+    if args.warmup:
+        if summary_fn is not None:
+            summary_fn("def warmup(): pass", 1)
+        else:
+            embed_fn(["warmup"])
 
     server = LoopbackHTTPServer(
-        ("127.0.0.1", args.port),
+        (args.host, args.port),
         build_handler(secret, info, summary_fn, embed_fn),
     )
     print("READY", flush=True)

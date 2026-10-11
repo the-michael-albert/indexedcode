@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 from indexedcode import embeddings, runtime_install
 from indexedcode.config import DEFAULTS, load_config
@@ -115,7 +116,8 @@ class SemanticIndex:
 
     def __init__(self, worker, client, fingerprint, max_batch_items,
                  summary_worker=None, summary_client=None,
-                 summary_fingerprint=None, max_output_tokens=256):
+                 summary_fingerprint=None, max_output_tokens=256,
+                 summary_concurrency=1, embed_concurrency=1):
         self.worker = worker
         self.client = client
         self.fingerprint = fingerprint
@@ -124,35 +126,44 @@ class SemanticIndex:
         self.summary_client = summary_client
         self.summary_fingerprint = summary_fingerprint
         self.max_output_tokens = max_output_tokens
+        self.summary_concurrency = max(1, summary_concurrency)
+        self.embed_concurrency = max(1, embed_concurrency)
+
+    def _summarize_one(self, text):
+        response = self.summary_client.summarize(
+            SUMMARY_PROMPT.format(code=text), self.max_output_tokens)
+        summary = (response.summary or "").strip()
+        if not summary:
+            raise RuntimeError("summary worker returned an empty summary")
+        return summary
 
     def summarize(self, texts):
-        """One summary per source text, in order; empty summaries raise."""
-        summaries = []
-        for text in texts:
-            response = self.summary_client.summarize(
-                SUMMARY_PROMPT.format(code=text), self.max_output_tokens)
-            summary = (response.summary or "").strip()
-            if not summary:
-                raise RuntimeError("summary worker returned an empty summary")
-            summaries.append(summary)
-        return summaries
+        """One summary per source text, in order; empty summaries raise.
+        Requests run concurrently up to ``summary_concurrency``."""
+        return _ordered_map(self._summarize_one, list(texts),
+                            self.summary_concurrency)
 
     def embed(self, texts):
         """Embed texts in bounded batches; vectors are validated."""
         texts = list(texts)
+        batches = [texts[start:start + self.max_batch_items]
+                   for start in range(0, len(texts), self.max_batch_items)]
         vectors = []
-        for start in range(0, len(texts), self.max_batch_items):
-            batch = texts[start:start + self.max_batch_items]
-            response = self.client.embed(batch)
-            if len(response.vectors) != len(batch):
-                raise embeddings.EmbeddingValidationError(
-                    f"worker returned {len(response.vectors)} vectors for"
-                    f" {len(batch)} texts")
-            for vector in response.vectors:
-                embeddings.validate(vector, response.dimension,
-                                    tolerance=NORMALIZE_TOLERANCE)
-            vectors.extend(response.vectors)
+        for batch_vectors in _ordered_map(
+                self._embed_batch, batches, self.embed_concurrency):
+            vectors.extend(batch_vectors)
         return vectors
+
+    def _embed_batch(self, batch):
+        response = self.client.embed(batch)
+        if len(response.vectors) != len(batch):
+            raise embeddings.EmbeddingValidationError(
+                f"worker returned {len(response.vectors)} vectors for"
+                f" {len(batch)} texts")
+        for vector in response.vectors:
+            embeddings.validate(vector, response.dimension,
+                                tolerance=NORMALIZE_TOLERANCE)
+        return response.vectors
 
     def _workers(self):
         return [w for w in (self.worker, self.summary_worker)
@@ -169,6 +180,22 @@ class SemanticIndex:
             stop = getattr(worker, "stop", None)
             if stop is not None:
                 stop()
+
+
+def _ordered_map(fn, items, concurrency):
+    """``list(map(fn, items))``, running up to ``concurrency`` at once."""
+    if concurrency <= 1 or len(items) <= 1:
+        return [fn(item) for item in items]
+    with ThreadPoolExecutor(max_workers=min(concurrency, len(items))) as pool:
+        return list(pool.map(fn, items))
+
+
+def _stage_concurrency(cfg):
+    """Managed local workers stay serial (memory budget); remote and
+    hosted-API stages honour ``max_concurrent_requests``."""
+    if cfg["mode"] == "managed":
+        return 1
+    return cfg.get("max_concurrent_requests", 1)
 
 
 def _start_stage(name, role, cfg, timeout_s):
@@ -244,7 +271,9 @@ def start_semantic_index(config_path=None) -> SemanticIndex:
         worker, client, fingerprint, emb_cfg.get("max_batch_items", 32),
         summary_worker=sum_worker, summary_client=sum_client,
         summary_fingerprint=sum_fp,
-        max_output_tokens=sum_cfg.get("max_output_tokens", 256))
+        max_output_tokens=sum_cfg.get("max_output_tokens", 256),
+        summary_concurrency=_stage_concurrency(sum_cfg),
+        embed_concurrency=_stage_concurrency(emb_cfg))
     try:
         # prove both runtimes work (and load weights once) before indexing
         try:
