@@ -22,7 +22,7 @@ def _no_real_embedding_worker(monkeypatch):
     """CLI tests must not spawn a real model worker; tests that want
     semantic indexing patch ``indexedcode.cli.try_start_semantic_index``."""
     monkeypatch.setattr("indexedcode.cli.try_start_semantic_index",
-                        lambda config_path=None, enabled=True: None)
+                        lambda config_path=None, enabled=True, **kw: None)
 
 
 @pytest.fixture()

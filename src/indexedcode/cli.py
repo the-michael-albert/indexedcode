@@ -26,10 +26,19 @@ from indexedcode.semantic import try_start_semantic_index
 logger = logging.getLogger(__name__)
 
 
-def _reconcile_logged(conn, root, what, model_fingerprint=None):
+def _fingerprints(semantic):
+    """(embedding, summary) fingerprints, or (None, None) without inference."""
+    if semantic is None:
+        return None, None
+    return semantic.fingerprint, semantic.summary_fingerprint
+
+
+def _reconcile_logged(conn, root, what, semantic=None):
     """reconcile() plus one log line when it found work (or on request)."""
+    model_fp, summary_fp = _fingerprints(semantic)
     result = reconcile(conn, root, now_ms=int(time.time() * 1000),
-                       model_fingerprint=model_fingerprint)
+                       model_fingerprint=model_fp,
+                       summary_fingerprint=summary_fp)
     if result.refresh_enqueued or result.remove_enqueued:
         logger.info("%s: %d to index, %d to remove, %d unchanged", what,
                     result.refresh_enqueued, result.remove_enqueued,
@@ -55,8 +64,9 @@ def _cmd_index_once(args) -> int:
             logger.info("indexing %s", args.root)
             semantic = try_start_semantic_index(
                 args.config, enabled=args.embeddings)
-            fingerprint = semantic.fingerprint if semantic else None
-            result = reconcile(conn, args.root, model_fingerprint=fingerprint)
+            model_fp, summary_fp = _fingerprints(semantic)
+            result = reconcile(conn, args.root, model_fingerprint=model_fp,
+                               summary_fingerprint=summary_fp)
             logger.info("found %d to index, %d to remove, %d unchanged "
                         "(%d candidates, %d skipped)",
                         result.refresh_enqueued, result.remove_enqueued,
@@ -158,13 +168,15 @@ def _cmd_serve(args) -> int:
         logger.info("watching %s", args.root)
         logger.info("index database %s", args.db)
         # initial reconciliation: index the tree before accepting traffic
+        inference = {}
         semantic = try_start_semantic_index(
-            args.config, enabled=args.embeddings)
+            args.config, enabled=args.embeddings,
+            on_status=inference.update)
 
         def fingerprint():
             return semantic.fingerprint if semantic is not None else None
 
-        _reconcile_logged(conn, args.root, "initial scan", fingerprint())
+        _reconcile_logged(conn, args.root, "initial scan", semantic)
         _drain(conn, args.root, semantic)
         logger.info("initial index ready (%s)",
                     "semantic search on" if semantic is not None
@@ -199,6 +211,7 @@ def _cmd_serve(args) -> int:
             conn, args.root, token=args.http_token, port=args.http_port,
             embedder=semantic.embed if semantic is not None else None,
             model_fingerprint=fingerprint(),
+            inference_status=lambda: dict(inference),
         )
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         print(f"listening {httpd.base_url}", file=sys.stderr, flush=True)
@@ -226,17 +239,21 @@ def _cmd_serve(args) -> int:
                                      " indexing stopped", exc)
                         semantic.stop()
                         semantic = None
+                        inference.update({
+                            stage: {"state": "unavailable",
+                                    "detail": f"worker failed: {exc}"}
+                            for stage in ("summary", "embedding")})
                 watcher.flush(now)
                 if dirty:
                     logger.debug("%d changed path(s) from the file watcher",
                                  len(dirty))
                     dirty.clear()
                     _reconcile_logged(conn, args.root, "change detected",
-                                      fingerprint())
+                                      semantic)
                 _drain(conn, args.root, semantic)
                 if now - last_reconcile >= args.poll_interval_s:
                     _reconcile_logged(conn, args.root, "periodic scan",
-                                      fingerprint())
+                                      semantic)
                     last_reconcile = now
                 stop.wait(0.1)
         finally:
@@ -253,8 +270,9 @@ def _drain(conn, root, semantic=None):
     """Process every due job; the pipeline logs each file it handles."""
     kwargs = {}
     if semantic is not None:
-        kwargs = {"embed": semantic.embed,
-                  "model_fingerprint": semantic.fingerprint}
+        kwargs = {"summarize": semantic.summarize, "embed": semantic.embed,
+                  "model_fingerprint": semantic.fingerprint,
+                  "summary_fingerprint": semantic.summary_fingerprint}
     return run_until_idle(conn, root, now_ms=int(time.time() * 1000),
                           **kwargs)
 
@@ -299,10 +317,12 @@ def build_parser():
     def add_semantic(sub):
         sub.add_argument(
             "--no-embeddings", dest="embeddings", action="store_false",
-            help="skip the embedding worker: symbol/lexical search only")
+            help="skip the summary and embedding workers: symbol/lexical"
+                 " search only")
         sub.add_argument(
             "--config", default=None,
-            help="indexedcode.toml selecting the embedding backend/model"
+            help="indexedcode.toml selecting the summarization and embedding"
+                 " backends/models"
                  " (default: MLX on Apple Silicon, CPU elsewhere)")
 
     sub = parser.add_subparsers(dest="group", required=True)

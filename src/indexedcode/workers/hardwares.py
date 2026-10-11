@@ -57,7 +57,8 @@ def rocm_summary(prompt: str, max_output_tokens: int = 256,
     pipeline = transformers.pipeline(
         "text-generation", model=model_path, device="cuda"
     )
-    result = pipeline(prompt, max_new_tokens=max_output_tokens)
+    result = pipeline(prompt, max_new_tokens=max_output_tokens,
+                      return_full_text=False)
     return result[0]["generated_text"]
 
 
@@ -104,5 +105,6 @@ def cpu_summary(prompt: str, max_output_tokens: int = 256,
     pipeline = transformers.pipeline(
         "text-generation", model=model_path, device="cpu"
     )
-    result = pipeline(prompt, max_new_tokens=max_output_tokens)
+    result = pipeline(prompt, max_new_tokens=max_output_tokens,
+                      return_full_text=False)
     return result[0]["generated_text"]

@@ -54,7 +54,7 @@ def run_benchmarks(root, db_path, *, lookup_samples=50,
         started = time.perf_counter()
         reconcile(conn, str(root), now_ms=_now_ms())
         run_until_idle(conn, str(root), embed=embedder,
-                       summarize=lambda texts: [""] * len(texts),
+                       summarize=lambda texts: ["summary"] * len(texts),
                        now_ms=_now_ms())
         initial_seconds = time.perf_counter() - started
         files_indexed = conn.execute(
@@ -101,7 +101,7 @@ def run_benchmarks(root, db_path, *, lookup_samples=50,
         baseline_calls = len(embedder.calls)
         reconcile(conn, str(root), now_ms=_now_ms())
         run_until_idle(conn, str(root), embed=embedder,
-                       summarize=lambda texts: [""] * len(texts),
+                       summarize=lambda texts: ["summary"] * len(texts),
                        now_ms=_now_ms())
         unchanged_calls = len(embedder.calls) - baseline_calls
 
@@ -111,7 +111,7 @@ def run_benchmarks(root, db_path, *, lookup_samples=50,
         changed_calls_before = len(embedder.calls)
         reconcile(conn, str(root), now_ms=_now_ms())
         run_until_idle(conn, str(root), embed=embedder,
-                       summarize=lambda texts: [""] * len(texts),
+                       summarize=lambda texts: ["summary"] * len(texts),
                        now_ms=_now_ms())
         changed_calls = len(embedder.calls) - changed_calls_before
         path.write_text(original)
@@ -124,13 +124,13 @@ def run_benchmarks(root, db_path, *, lookup_samples=50,
             watcher.record("src/noop.py", now=time.monotonic())
             watcher.flush(time.monotonic())
             run_until_idle(conn, str(root), embed=embedder,
-                           summarize=lambda t: [""] * len(t),
+                           summarize=lambda t: ["summary"] * len(t),
                            now_ms=_now_ms())
             idle_loops += 1
         idle_seconds = time.perf_counter() - t0
         reconcile(conn, str(root), now_ms=_now_ms())
         run_until_idle(conn, str(root), embed=embedder,
-                       summarize=lambda texts: [""] * len(texts),
+                       summarize=lambda texts: ["summary"] * len(texts),
                        now_ms=_now_ms())
         idle_pending = conn.execute(
             "SELECT COUNT(*) AS c FROM jobs WHERE status IN"

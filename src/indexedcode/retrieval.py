@@ -453,8 +453,42 @@ def get_references(conn, root, symbol, *, limit=DEFAULT_REFERENCES,
 # --- status --------------------------------------------------------------------
 
 
-def get_status(conn, root):
-    """Index health: coverage, queue state, staleness, failures."""
+def _inference_progress(conn, inference_status):
+    """Summary/embedding completion, separate from structural indexing.
+
+    ``inference_status`` is the live per-stage startup state from the
+    serving process (``{"summary": {"state", "detail"}, ...}``); without it
+    the stage states are ``unknown`` and only the counts speak.
+    """
+    total = summarized = 0
+    for table in ("functions", "classes"):
+        row = conn.execute(
+            f"SELECT COUNT(*) AS total, COUNT(summary) AS summarized"
+            f" FROM {table}").fetchone()
+        total += row["total"]
+        summarized += row["summarized"]
+    embedded = conn.execute(
+        "SELECT COUNT(*) AS c FROM entity_index"
+        " WHERE entity_type IN ('function', 'class')").fetchone()["c"]
+    stages = {}
+    for stage, done in (("summary", summarized), ("embedding", embedded)):
+        info = dict((inference_status or {}).get(stage)
+                    or {"state": "unknown", "detail": None})
+        info.update(done=done, total=total)
+        stages[stage] = info
+    return {
+        "complete": summarized == total and embedded == total,
+        "stages": stages,
+    }
+
+
+def get_status(conn, root, inference_status=None):
+    """Index health: coverage, queue state, staleness, failures.
+
+    ``coverage``/``pending_jobs`` describe structural indexing only;
+    ``inference`` reports summary and embedding completion (and why a
+    stage is unavailable) so an empty queue never implies they ran.
+    """
     root_path = Path(root)
     coverage = {
         "ready_files": conn.execute(
@@ -496,6 +530,7 @@ def get_status(conn, root):
         "model_fingerprint": (
             fingerprint["model_fingerprint"] if fingerprint else None
         ),
+        "inference": _inference_progress(conn, inference_status),
     }
 
 

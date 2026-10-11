@@ -40,7 +40,7 @@ Issues = "https://github.com/the-michael-albert/indexedcode/issues"
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
-mlx = ["mlx-embeddings"]
+mlx = ["mlx-embeddings", "mlx-lm"]
 cpu = ["torch", "transformers"]
 
 [project.scripts]
