@@ -194,19 +194,23 @@ def process_next_job(
     old_hashes, old_summaries, old_index = _existing_snapshot(conn, file_row)
     entities = [("function", fn) for fn in extracted.functions]
     entities += [("class", cls) for cls in extracted.classes]
+    # occurrence keys tell same-named definitions apart; stored data is
+    # matched to them by source hash first so reordering/edits keep caches
+    keys = _occurrence_keys(extracted)
+    old_of = _match_old(entities, keys, old_hashes)
 
     # stage 1: summaries. An entity keeps its stored summary while it was
     # produced from the same source by the same summary model.
     summaries: dict[tuple, tuple[str, str]] = {}  # key -> (text, identity)
     to_summarize = []
     for kind, ent in entities:
-        key = (kind, ent.qualified_name)
-        old = old_summaries.get(key)
+        key = keys[id(ent)]
+        old = old_summaries.get(old_of.get(key))
         identity = _summary_identity(summary_fingerprint, ent.source_hash)
         if summarize is None:
             # no summarizer: keep a summary only while its source is intact
             if (old is not None and old[0] and old[1]
-                    and old_hashes.get(key) == ent.source_hash):
+                    and old_hashes.get(old_of.get(key)) == ent.source_hash):
                 summaries[key] = old
         elif old is not None and old[0] and old[1] == identity:
             summaries[key] = old
@@ -217,7 +221,7 @@ def process_next_job(
     def needs_vector(key):
         if embed is None or key not in summaries:
             return False
-        old = old_index.get(key)
+        old = old_index.get(old_of.get(key))
         return (old is None or old["model_fingerprint"] != model_fingerprint
                 or old["input_hash"]
                 != _vector_identity(model_fingerprint, summaries[key][1]))
@@ -238,7 +242,7 @@ def process_next_job(
                     raise ValueError(f"empty summary for {key[1]}")
                 summaries[key] = (text.strip(), identity)
         to_embed = [key for key in
-                    ((kind, ent.qualified_name) for kind, ent in entities)
+                    (keys[id(ent)] for _, ent in entities)
                     if needs_vector(key)]
         if to_embed:
             embedded = embed([summaries[key][0] for key in to_embed])
@@ -281,8 +285,8 @@ def process_next_job(
             source_hash=fn.source_hash,
             parent_class_qname=fn.parent_class_qname,
             parent_function_qname=fn.parent_function_qname,
-            summary=_summary_text(summaries, "function", fn),
-            summary_input_hash=_summary_id(summaries, "function", fn),
+            summary=_summary_text(summaries, keys, fn),
+            summary_input_hash=_summary_id(summaries, keys, fn),
         )
         for fn in extracted.functions
     ]
@@ -298,8 +302,8 @@ def process_next_job(
             source=cls.source,
             source_hash=cls.source_hash,
             parent_class_qname=cls.parent_class_qname,
-            summary=_summary_text(summaries, "class", cls),
-            summary_input_hash=_summary_id(summaries, "class", cls),
+            summary=_summary_text(summaries, keys, cls),
+            summary_input_hash=_summary_id(summaries, keys, cls),
         )
         for cls in extracted.classes
     ]
@@ -317,6 +321,7 @@ def process_next_job(
     ]
     entity_index = _entity_index_rows(
         extracted, vectors, summaries, old_index, model_fingerprint,
+        keys, old_of,
     )
 
     stat = path.stat()
@@ -390,28 +395,80 @@ def _vector_identity(model_fingerprint, summary_identity):
     return f"{model_fingerprint}:{summary_identity}"
 
 
-def _summary_text(summaries, kind, ent):
-    found = summaries.get((kind, ent.qualified_name))
+def _summary_text(summaries, keys, ent):
+    found = summaries.get(keys[id(ent)])
     return found[0] if found else None
 
 
-def _summary_id(summaries, kind, ent):
-    found = summaries.get((kind, ent.qualified_name))
+def _summary_id(summaries, keys, ent):
+    found = summaries.get(keys[id(ent)])
     return found[1] if found else None
 
 
+def _occurrence_keys(extracted):
+    """Map ``id(entity)`` -> ``(kind, qualified_name, ordinal)``.
+
+    A qualified name is not unique within a file (e.g. the same helper defined
+    in two branches of one function); the ordinal is the entity's position
+    among same-named definitions in source order.
+    """
+    keys, seen = {}, {}
+    for kind, entities in (("function", extracted.functions),
+                           ("class", extracted.classes)):
+        for ent in entities:
+            base = (kind, ent.qualified_name)
+            ordinal = seen.get(base, 0)
+            seen[base] = ordinal + 1
+            keys[id(ent)] = (*base, ordinal)
+    return keys
+
+
+def _match_old(entities, keys, old_hashes):
+    """Pair each new occurrence key with the stored one it descends from.
+
+    Within a (kind, qualified_name) group, identical source hashes pair first
+    (so inserting, removing or reordering duplicates keeps correct data);
+    leftovers pair by position. Unmatched new keys get no entry.
+    """
+    old_by_base = {}
+    for okey in old_hashes:
+        old_by_base.setdefault(okey[:2], []).append(okey)
+    new_by_base = {}
+    for _, ent in entities:
+        nkey = keys[id(ent)]
+        new_by_base.setdefault(nkey[:2], []).append((nkey, ent.source_hash))
+    matched = {}
+    for base, news in new_by_base.items():
+        free = sorted(old_by_base.get(base, ()))
+        rest = []
+        for nkey, digest in news:
+            hit = next((o for o in free if old_hashes[o] == digest), None)
+            if hit is None:
+                rest.append(nkey)
+            else:
+                free.remove(hit)
+                matched[nkey] = hit
+        for nkey, okey in zip(rest, free):
+            matched[nkey] = okey
+    return matched
+
+
 def _existing_snapshot(conn, file_row):
-    """Return the stored state of a file's entities, keyed by (kind, qname):
+    """Return the stored state of a file's entities, keyed by (kind, qname, ordinal):
     ({source_hash}, {(summary, summary_input_hash)}, {entity_index row})."""
     file_id = file_row["id"]
     hashes, summaries, index = {}, {}, {}
     for kind, table in (("function", "functions"), ("class", "classes")):
+        seen = {}
         for row in conn.execute(
             f"SELECT id, qualified_name, source_hash, summary,"
-            f" summary_input_hash FROM {table} WHERE file_id = ?",
+            f" summary_input_hash FROM {table} WHERE file_id = ?"
+            f" ORDER BY id",
             (file_id,),
         ):
-            key = (kind, row["qualified_name"])
+            ordinal = seen.get(row["qualified_name"], 0)
+            seen[row["qualified_name"]] = ordinal + 1
+            key = (kind, row["qualified_name"], ordinal)
             hashes[key] = row["source_hash"]
             summaries[key] = (row["summary"], row["summary_input_hash"])
             vector = conn.execute(
@@ -425,7 +482,7 @@ def _existing_snapshot(conn, file_row):
 
 
 def _entity_index_rows(extracted, vectors, summaries, old_index,
-                       model_fingerprint):
+                       model_fingerprint, keys, old_of):
     """One search row per function/class. Vectors are embeddings of the
     generated summary; ``search_text`` stays the raw source so lexical
     retrieval is unaffected. An unchanged retained vector is reused."""
@@ -434,19 +491,20 @@ def _entity_index_rows(extracted, vectors, summaries, old_index,
                            ("class", extracted.classes)):
         for ent in entities:
             rows.append(_index_row(
-                kind, ent, vectors, summaries, old_index, model_fingerprint))
+                kind, ent, vectors, summaries, old_index, model_fingerprint,
+                keys[id(ent)], old_of))
     return [row for row in rows if row is not None]
 
 
-def _index_row(kind, ent, vectors, summaries, old_index, model_fingerprint):
-    key = (kind, ent.qualified_name)
+def _index_row(kind, ent, vectors, summaries, old_index, model_fingerprint,
+               key, old_of):
     vector = vectors.get(key)
     if vector is not None:
         embedding = pack(vector)
         dimensions = len(vector)
         input_hash = _vector_identity(model_fingerprint, summaries[key][1])
     else:
-        old = old_index.get(key)
+        old = old_index.get(old_of.get(key))
         if old is None:
             return None  # no inference available; omit the row
         embedding = old["embedding"]
@@ -458,6 +516,7 @@ def _index_row(kind, ent, vectors, summaries, old_index, model_fingerprint):
     return {
         "entity_type": kind,
         "entity_key": ent.qualified_name,
+        "entity_ordinal": key[2],
         "search_text": ent.source,
         "embedding": embedding,
         "dimensions": dimensions,

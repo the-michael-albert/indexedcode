@@ -569,6 +569,18 @@ def ensure_file_row(conn, folder, file, language, is_test, now_ms):
     ).fetchone()
 
 
+def _pick_occurrence(occurrences, line):
+    """Id of the same-named definition whose span contains ``line``; the
+    latest occurrence when none does (or no line is known)."""
+    if not occurrences:
+        return None
+    if line is not None:
+        for entity_id, start, end in reversed(occurrences):
+            if start <= line <= end:
+                return entity_id
+    return occurrences[-1][0]
+
+
 def publish_file_refresh(conn, job, file_row, classes, functions, relationships,
                          now_ms, indexed_hash=None, entity_index=None,
                          queue_duration_ms=0, process_duration_ms=0):
@@ -587,7 +599,11 @@ def publish_file_refresh(conn, job, file_row, classes, functions, relationships,
     (qualified name, or the literal ``"file"``/``"module"``) and are
     resolved to fresh ids before insertion (plan §7.3 step 4).
 
-    Returns ``{"file_id", "functions": {qname: id}, "classes": {qname: id}}``.
+    A row may carry ``entity_ordinal`` (default 0) selecting among several
+    definitions sharing a qualified name, in source order.
+
+    Returns ``{"file_id", "functions": {qname: id}, "classes": {qname: id}}``
+    where a duplicated name maps to its last occurrence.
     """
     classes = [c if isinstance(c, ClassDef) else ClassDef.model_validate(c)
                for c in classes]
@@ -617,11 +633,18 @@ def publish_file_refresh(conn, job, file_row, classes, functions, relationships,
 
         # 2-3. insert refreshed entities, resolving qname linkage to the
         # fresh ids as we go (parents are always emitted before children)
+        # Qualified names are display names, not identities: sibling branches
+        # may define the same name twice. Each name maps to its occurrences in
+        # emission order, which is also source order.
+        class_occ: dict[str, list[tuple[int, int, int]]] = {}
         class_ids: dict[str, int] = {}
         for cls in classes:
             parent_id = cls.parent_class_id
             if parent_id is None and cls.parent_class_qname is not None:
-                parent_id = class_ids.get(cls.parent_class_qname)
+                # parents are emitted before children, so the latest
+                # occurrence of the name is the enclosing one
+                parent = class_occ.get(cls.parent_class_qname)
+                parent_id = parent[-1][0] if parent else None
             _insert_class_row(
                 conn, file_id,
                 cls.model_copy(update={
@@ -629,18 +652,22 @@ def publish_file_refresh(conn, job, file_row, classes, functions, relationships,
                 }),
                 now_ms,
             )
-            class_ids[cls.qualified_name] = (
-                conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-            )
+            new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            class_occ.setdefault(cls.qualified_name, []).append(
+                (new_id, cls.start_line, cls.end_line))
+            class_ids[cls.qualified_name] = new_id
+        fn_occ: dict[str, list[tuple[int, int, int]]] = {}
         function_ids: dict[str, int] = {}
         for fn in functions:
             class_id = fn.class_id
             if class_id is None and fn.parent_class_qname is not None:
-                class_id = class_ids.get(fn.parent_class_qname)
+                parent = class_occ.get(fn.parent_class_qname)
+                class_id = parent[-1][0] if parent else None
             parent_fn_id = fn.parent_function_id
             if (parent_fn_id is None
                     and fn.parent_function_qname is not None):
-                parent_fn_id = function_ids.get(fn.parent_function_qname)
+                parent = fn_occ.get(fn.parent_function_qname)
+                parent_fn_id = parent[-1][0] if parent else None
             _insert_function_row(
                 conn, file_id,
                 fn.model_copy(update={
@@ -649,15 +676,18 @@ def publish_file_refresh(conn, job, file_row, classes, functions, relationships,
                 }),
                 now_ms,
             )
-            function_ids[fn.qualified_name] = (
-                conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-            )
+            new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            fn_occ.setdefault(fn.qualified_name, []).append(
+                (new_id, fn.start_line, fn.end_line))
+            function_ids[fn.qualified_name] = new_id
         for rel in relationships:
             source_id = rel.source_id
             if source_id is None:
-                source_id = function_ids.get(rel.source_qname)
+                source_id = _pick_occurrence(
+                    fn_occ.get(rel.source_qname), rel.line_number)
                 if source_id is None:
-                    source_id = class_ids.get(rel.source_qname)
+                    source_id = _pick_occurrence(
+                        class_occ.get(rel.source_qname), rel.line_number)
                 if source_id is None:
                     # file-level edge (e.g. imports): the origin file is
                     # the relationship's source entity
@@ -683,13 +713,25 @@ def publish_file_refresh(conn, job, file_row, classes, functions, relationships,
 
         # 4. upsert entity_index rows for this snapshot's entities,
         # resolving each row's entity_key to a fresh id
+        seen_index: set[tuple] = set()
         for row in entity_index or ():
             entity_type = row["entity_type"]
             key = row["entity_key"]
+            # which same-named definition this row belongs to (source order)
+            ordinal = row.get("entity_ordinal", 0)
+            row = {k: v for k, v in row.items() if k != "entity_ordinal"}
+            if (entity_type, key, ordinal) in seen_index:
+                raise ValueError(
+                    f"duplicate entity_index occurrence {entity_type}"
+                    f" {key!r} #{ordinal}"
+                )
+            seen_index.add((entity_type, key, ordinal))
             if entity_type == "function":
-                entity_id = function_ids.get(key)
+                occ = fn_occ.get(key, ())
+                entity_id = occ[ordinal][0] if ordinal < len(occ) else None
             elif entity_type == "class":
-                entity_id = class_ids.get(key)
+                occ = class_occ.get(key, ())
+                entity_id = occ[ordinal][0] if ordinal < len(occ) else None
             elif entity_type == "file":
                 entity_id = file_id
             elif entity_type == "module":

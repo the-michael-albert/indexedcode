@@ -211,3 +211,61 @@ def test_try_start_reports_stage_status(monkeypatch):
     semantic.try_start_semantic_index(enabled=False,
                                       on_status=disabled.append)
     assert disabled[0]["embedding"]["state"] == "disabled"
+
+
+DUP = (
+    "def outer(flag):\n"
+    "    if flag:\n"
+    "        def cap(x):\n"
+    "            return x + 1\n"
+    "        return cap(1)\n"
+    "    else:\n"
+    "        def cap(x):\n"
+    "            return x * 2\n"
+    "        return cap(2)\n"
+)
+
+
+def _dup_rows(conn):
+    return conn.execute(
+        "SELECT f.id, f.source, f.summary, f.parent_function_id,"
+        " e.search_text, e.embedding FROM functions f"
+        " JOIN entity_index e ON e.entity_type = 'function'"
+        " AND e.entity_id = f.id WHERE f.qualified_name = 'outer.cap'"
+        " ORDER BY f.start_byte").fetchall()
+
+
+def test_duplicate_qualified_names_get_distinct_index_rows(db, tmp_path):
+    (tmp_path / "a.py").write_text(DUP)
+    summarize = lambda texts: [f"does: {' '.join(t.split())}"
+                               for t in texts]
+    embed = FakeEmbedder()
+    index(db, tmp_path, embed, summarize)
+    rows = _dup_rows(db)
+    assert len(rows) == 2
+    assert rows[0]["id"] != rows[1]["id"]
+    assert "x + 1" in rows[0]["source"] and "x + 1" in rows[0]["search_text"]
+    assert "x * 2" in rows[1]["source"] and "x * 2" in rows[1]["search_text"]
+    assert rows[0]["summary"] != rows[1]["summary"]
+    assert rows[0]["embedding"] != rows[1]["embedding"]
+    outer = db.execute(
+        "SELECT id FROM functions WHERE qualified_name = 'outer'").fetchone()
+    assert {r["parent_function_id"] for r in rows} == {outer["id"]}
+
+    # unchanged refresh: no inference, same rows
+    calls = len(embed.calls)
+    (tmp_path / "a.py").write_text("# lead\n" + DUP)
+    index(db, tmp_path, embed, summarize, now_ms=2000)
+    assert len(embed.calls) == calls
+    again = _dup_rows(db)
+    assert [r["summary"] for r in again] == [r["summary"] for r in rows]
+    assert [r["embedding"] for r in again] == [r["embedding"] for r in rows]
+
+    # editing only the second duplicate leaves the first one's data alone
+    (tmp_path / "a.py").write_text(DUP.replace("x * 2", "x * 3"))
+    index(db, tmp_path, embed, summarize, now_ms=3000)
+    edited = _dup_rows(db)
+    assert edited[0]["summary"] == rows[0]["summary"]
+    assert edited[0]["embedding"] == rows[0]["embedding"]
+    assert "x * 3" in edited[1]["summary"]
+    assert edited[1]["embedding"] != rows[1]["embedding"]
