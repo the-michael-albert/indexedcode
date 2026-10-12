@@ -12,6 +12,7 @@ attempts fail terminally with a categorical error code.
 from __future__ import annotations
 
 import logging
+import sqlite3
 import time
 from pathlib import Path
 
@@ -325,12 +326,24 @@ def process_next_job(
     )
 
     stat = path.stat()
-    publish_file_refresh(
-        conn, job, file_row, classes, functions, relationships, now_ms,
-        indexed_hash=digest, entity_index=entity_index,
-        queue_duration_ms=queue_duration,
-        process_duration_ms=max(0, now_ms - started),
-    )
+    try:
+        publish_file_refresh(
+            conn, job, file_row, classes, functions, relationships, now_ms,
+            indexed_hash=digest, entity_index=entity_index,
+            queue_duration_ms=queue_duration,
+            process_duration_ms=max(0, now_ms - started),
+        )
+    except (sqlite3.Error, ValueError, KeyError) as exc:
+        # publication rolled back: the last-good snapshot is intact. Isolate
+        # the failure to this job so the rest of the queue keeps draining;
+        # attempts stay bounded by finish_retry.
+        logger.error("PUBLISH  %s failed: %s: %s", job_label,
+                     type(exc).__name__, exc)
+        _mark_file_error(conn, folder, file, "publish_error", now_ms,
+                         language=language)
+        return finish_retry(
+            "publish_error", f"publication failed: {type(exc).__name__}: {exc}",
+        )
     conn.execute(
         "UPDATE files SET observed_mtime_ns = ?, observed_size_bytes = ?,"
         " observed_hash = ?, updated_at_ms = ? WHERE folder = ? AND file = ?",

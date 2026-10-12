@@ -641,10 +641,8 @@ def publish_file_refresh(conn, job, file_row, classes, functions, relationships,
         for cls in classes:
             parent_id = cls.parent_class_id
             if parent_id is None and cls.parent_class_qname is not None:
-                # parents are emitted before children, so the latest
-                # occurrence of the name is the enclosing one
-                parent = class_occ.get(cls.parent_class_qname)
-                parent_id = parent[-1][0] if parent else None
+                parent_id = _pick_occurrence(
+                    class_occ.get(cls.parent_class_qname), cls.start_line)
             _insert_class_row(
                 conn, file_id,
                 cls.model_copy(update={
@@ -661,13 +659,14 @@ def publish_file_refresh(conn, job, file_row, classes, functions, relationships,
         for fn in functions:
             class_id = fn.class_id
             if class_id is None and fn.parent_class_qname is not None:
-                parent = class_occ.get(fn.parent_class_qname)
-                class_id = parent[-1][0] if parent else None
+                # all classes exist by now, so pick the enclosing one by span
+                class_id = _pick_occurrence(
+                    class_occ.get(fn.parent_class_qname), fn.start_line)
             parent_fn_id = fn.parent_function_id
             if (parent_fn_id is None
                     and fn.parent_function_qname is not None):
-                parent = fn_occ.get(fn.parent_function_qname)
-                parent_fn_id = parent[-1][0] if parent else None
+                parent_fn_id = _pick_occurrence(
+                    fn_occ.get(fn.parent_function_qname), fn.start_line)
             _insert_function_row(
                 conn, file_id,
                 fn.model_copy(update={
