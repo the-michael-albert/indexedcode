@@ -211,3 +211,164 @@ def test_try_start_reports_stage_status(monkeypatch):
     semantic.try_start_semantic_index(enabled=False,
                                       on_status=disabled.append)
     assert disabled[0]["embedding"]["state"] == "disabled"
+
+
+DUP = (
+    "def outer(flag):\n"
+    "    if flag:\n"
+    "        def cap(x):\n"
+    "            return x + 1\n"
+    "        return cap(1)\n"
+    "    else:\n"
+    "        def cap(x):\n"
+    "            return x * 2\n"
+    "        return cap(2)\n"
+)
+
+
+def _dup_rows(conn):
+    return conn.execute(
+        "SELECT f.id, f.source, f.summary, f.parent_function_id,"
+        " e.search_text, e.embedding FROM functions f"
+        " JOIN entity_index e ON e.entity_type = 'function'"
+        " AND e.entity_id = f.id WHERE f.qualified_name = 'outer.cap'"
+        " ORDER BY f.start_byte").fetchall()
+
+
+def test_duplicate_qualified_names_get_distinct_index_rows(db, tmp_path):
+    (tmp_path / "a.py").write_text(DUP)
+    summarize = lambda texts: [f"does: {' '.join(t.split())}"
+                               for t in texts]
+    embed = FakeEmbedder()
+    index(db, tmp_path, embed, summarize)
+    rows = _dup_rows(db)
+    assert len(rows) == 2
+    assert rows[0]["id"] != rows[1]["id"]
+    assert "x + 1" in rows[0]["source"] and "x + 1" in rows[0]["search_text"]
+    assert "x * 2" in rows[1]["source"] and "x * 2" in rows[1]["search_text"]
+    assert rows[0]["summary"] != rows[1]["summary"]
+    assert rows[0]["embedding"] != rows[1]["embedding"]
+    outer = db.execute(
+        "SELECT id FROM functions WHERE qualified_name = 'outer'").fetchone()
+    assert {r["parent_function_id"] for r in rows} == {outer["id"]}
+
+    # unchanged refresh: no inference, same rows
+    calls = len(embed.calls)
+    (tmp_path / "a.py").write_text("# lead\n" + DUP)
+    index(db, tmp_path, embed, summarize, now_ms=2000)
+    assert len(embed.calls) == calls
+    again = _dup_rows(db)
+    assert [r["summary"] for r in again] == [r["summary"] for r in rows]
+    assert [r["embedding"] for r in again] == [r["embedding"] for r in rows]
+
+    # editing only the second duplicate leaves the first one's data alone
+    (tmp_path / "a.py").write_text(DUP.replace("x * 2", "x * 3"))
+    index(db, tmp_path, embed, summarize, now_ms=3000)
+    edited = _dup_rows(db)
+    assert edited[0]["summary"] == rows[0]["summary"]
+    assert edited[0]["embedding"] == rows[0]["embedding"]
+    assert "x * 3" in edited[1]["summary"]
+    assert edited[1]["embedding"] != rows[1]["embedding"]
+
+
+def _cap_summaries(conn):
+    return [r["summary"] for r in conn.execute(
+        "SELECT summary FROM functions WHERE qualified_name = 'outer.cap'"
+        " ORDER BY start_byte")]
+
+
+def _index_count(conn):
+    return conn.execute("SELECT COUNT(*) FROM entity_index").fetchone()[0]
+
+
+def _expected(conn):
+    return conn.execute(
+        "SELECT (SELECT COUNT(*) FROM functions)"
+        " + (SELECT COUNT(*) FROM classes)").fetchone()[0]
+
+
+def test_duplicate_transitions_keep_data_and_index_consistent(db, tmp_path):
+    calls = []
+
+    def summarize(texts):
+        calls.append(list(texts))
+        return [f"does: {' '.join(t.split())}" for t in texts]
+
+    embed = FakeEmbedder()
+    path = tmp_path / "a.py"
+    path.write_text(DUP)
+    index(db, tmp_path, embed, summarize)
+    first, second = _cap_summaries(db)
+    assert first != second
+
+    # reorder: swap the two branches' bodies; data follows the source
+    swapped = DUP.replace("x + 1", "TMP").replace("x * 2", "x + 1") \
+                 .replace("TMP", "x * 2")
+    path.write_text(swapped)
+    n = len(calls)
+    index(db, tmp_path, embed, summarize, now_ms=2000)
+    assert _cap_summaries(db) == [second, first]
+    assert len(calls) == n + 1  # only `outer` changed
+    assert _index_count(db) == _expected(db)
+
+    # remove one duplicate
+    single = ("def outer(flag):\n    def cap(x):\n        return x * 2\n"
+              "    return cap(2)\n")
+    path.write_text(single)
+    index(db, tmp_path, embed, summarize, now_ms=3000)
+    assert _cap_summaries(db) == [second]
+    assert _index_count(db) == _expected(db)
+
+    # add a duplicate back
+    path.write_text(DUP)
+    index(db, tmp_path, embed, summarize, now_ms=4000)
+    assert sorted(_cap_summaries(db)) == sorted([first, second])
+    assert _index_count(db) == _expected(db)
+
+
+def test_duplicate_classes_and_nested_links(db, tmp_path):
+    (tmp_path / "a.py").write_text(
+        "def make(flag):\n"
+        "    if flag:\n"
+        "        class C:\n"
+        "            def m(self):\n"
+        "                return 1\n"
+        "    else:\n"
+        "        class C:\n"
+        "            def m(self):\n"
+        "                return 2\n"
+        "    return C\n"
+    )
+    index(db, tmp_path, FakeEmbedder(), FakeSummarizer())
+    classes = db.execute(
+        "SELECT id FROM classes WHERE qualified_name = 'C'"
+        " ORDER BY start_byte").fetchall()
+    methods = db.execute(
+        "SELECT class_id, source FROM functions WHERE name = 'm'"
+        " ORDER BY start_byte").fetchall()
+    assert len(classes) == 2
+    assert [m["class_id"] for m in methods] == [c["id"] for c in classes]
+    assert _index_count(db) == _expected(db)
+
+
+def test_publication_failure_is_isolated_and_bounded(db, tmp_path, monkeypatch):
+    import sqlite3
+    from indexedcode import pipeline
+
+    (tmp_path / "bad.py").write_text("def f():\n    return 1\n")
+    (tmp_path / "good.py").write_text("def g():\n    return 2\n")
+    real = pipeline.publish_file_refresh
+
+    def flaky(conn, job, file_row, *a, **kw):
+        if file_row["file"] == "bad.py":
+            raise sqlite3.IntegrityError("boom")
+        return real(conn, job, file_row, *a, **kw)
+
+    monkeypatch.setattr(pipeline, "publish_file_refresh", flaky)
+    counts = index(db, tmp_path, FakeEmbedder(), FakeSummarizer())
+    assert counts.get("failed") == 1  # gave up after bounded attempts
+    assert counts.get("completed") == 1  # the other file still published
+    assert db.execute("SELECT status FROM files WHERE file = 'good.py'"
+                      ).fetchone()[0] == "ready"
+    assert db.execute("SELECT last_error FROM files WHERE file = 'bad.py'"
+                      ).fetchone()[0] == "publish_error"
