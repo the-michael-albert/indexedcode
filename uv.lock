@@ -643,7 +643,7 @@ wheels = [
 
 [[package]]
 name = "indexedcode"
-version = "1.0.0a7"
+version = "1.0.0a8"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
