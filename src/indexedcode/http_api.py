@@ -14,13 +14,14 @@ from http.server import BaseHTTPRequestHandler
 from importlib import resources
 from urllib.parse import urlsplit
 
-from indexedcode import retrieval
+from indexedcode import graphql_api, retrieval
 from indexedcode.httpserver import LoopbackHTTPServer
 
 logger = logging.getLogger(__name__)
 
 MAX_REQUEST_BYTES = 32_768
 MAX_RESPONSE_CHARS = retrieval.MAX_CHARS_CAP
+_VENDORED_JS = frozenset({"graphology.min.js", "sigma.min.js", "fa2.min.js"})
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "[::1]", "::1"})
 
 
@@ -72,7 +73,7 @@ def create_server(conn, root, token=None, host="127.0.0.1", port=0,
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Content-Security-Policy",
-                             "default-src 'none'; script-src 'unsafe-inline';"
+                             "default-src 'none'; script-src 'unsafe-inline' 'self';"
                              " style-src 'unsafe-inline';"
                              " connect-src 'self'; base-uri 'none';"
                              " form-action 'none'")
@@ -106,6 +107,13 @@ def create_server(conn, root, token=None, host="127.0.0.1", port=0,
                     .replace("{auth}", auth_note).encode("utf-8"),
                     "text/plain; charset=utf-8",
                 )
+            if method == "GET" and target.path.startswith("/web/"):
+                # vendored UI libraries: static code, no index data
+                name = target.path[len("/web/"):]
+                if name not in _VENDORED_JS:
+                    return self._send(404, {"error": "not found"})
+                return self._send_html(
+                    _load_web(name), "application/javascript; charset=utf-8")
             if not self._authorized():
                 return self._send(401, {"error": "unauthorized"})
             try:
@@ -127,6 +135,25 @@ def create_server(conn, root, token=None, host="127.0.0.1", port=0,
                 raw = self.rfile.read(length) if length else b"{}"
                 request = json.loads(raw)
 
+                if self.path == "/v1/graphql":
+                    query = request.get("query")
+                    variables = request.get("variables")
+                    if not isinstance(query, str) or not query.strip():
+                        raise ValueError("query must be a non-empty string")
+                    if variables is not None and not isinstance(variables, dict):
+                        raise ValueError("variables must be an object")
+                    gql = graphql_api.execute(
+                        conn, root, query,
+                        variables=variables,
+                        operation_name=request.get("operationName"),
+                        embedder=embedder,
+                        model_fingerprint=model_fingerprint,
+                        max_chars=max_response_chars,
+                    )
+                    payload = {"data": gql.data}
+                    if gql.errors:
+                        payload["errors"] = [e.formatted for e in gql.errors]
+                    return self._send(200, payload)
                 if self.path == "/v1/search":
                     result = retrieval.search(
                         conn, root, request.get("query", ""),
