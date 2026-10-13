@@ -1,6 +1,6 @@
 [project]
 name = "indexedcode"
-version = "1.0.0a8"
+version = "1.0.0a9"
 description = "Local repository indexing orchestrator"
 readme = "README.md"
 license = "Apache-2.0"
@@ -36,6 +36,7 @@ dependencies = [
     # and embeddings work after a plain `uv tool install` / `pipx install`.
     "mlx-embeddings; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "mlx-lm; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "graphql-core>=3.2,<4",
 ]
 
 [project.urls]
@@ -59,7 +60,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-indexedcode = ["web/*.html", "web/*.txt"]
+indexedcode = ["web/*.html", "web/*.txt", "web/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

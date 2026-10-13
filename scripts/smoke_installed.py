@@ -75,6 +75,16 @@ def main():
                     assert b"IndexedCode" in response.read()
                 with urllib.request.urlopen(base + "/llms.txt", timeout=10) as response:
                     assert f"{base}/v1/search".encode() in response.read()
+                graphql = urllib.request.Request(
+                    base + "/v1/graphql", method="POST",
+                    data=json.dumps({"query": "{ modules { path } }"}).encode(),
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(graphql, timeout=10) as response:
+                    assert "errors" not in json.load(response)
+                # vendored UI libraries must ship in the installed package
+                with urllib.request.urlopen(base + "/web/sigma.min.js", timeout=10) as response:
+                    assert response.read(1)
             finally:
                 proc.terminate()
                 try:

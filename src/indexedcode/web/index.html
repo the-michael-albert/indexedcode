@@ -81,6 +81,13 @@
     background: var(--panel); color: var(--text); width: min(420px, 92vw); }
   dialog::backdrop { background: rgba(0,0,0,.45); }
   .note { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .graph-wrap { position: relative; }
+  #graph { height: 520px; background: var(--panel); cursor: grab; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; padding: 8px 14px;
+    border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+  .legend .chip { display: inline-flex; align-items: center; gap: 6px; }
+  .legend .swatch { width: 10px; height: 10px; border-radius: 50%; }
+  #graph-detail { margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -117,6 +124,20 @@
     </form>
     <div class="panel" id="results"><div class="empty">Enter a query to search the index.</div></div>
   </section>
+
+  <section>
+    <h2>Graph <span class="count" id="graph-count"></span></h2>
+    <form id="graph-form">
+      <select id="graph-scope" title="module scope"></select>
+      <input type="search" id="graph-q" placeholder="semantic highlight, e.g. load config from disk" autocomplete="off">
+      <button type="submit">Draw</button>
+    </form>
+    <div class="panel graph-wrap">
+      <div id="graph"><div class="empty" style="padding:24px">Pick a module and press Draw.</div></div>
+      <div class="legend" id="graph-legend"></div>
+    </div>
+    <div class="meta" id="graph-detail"></div>
+  </section>
 </main>
 
 <dialog id="auth">
@@ -128,6 +149,9 @@
   </form>
 </dialog>
 
+<script src="/web/graphology.min.js"></script>
+<script src="/web/sigma.min.js"></script>
+<script src="/web/fa2.min.js"></script>
 <script>
 "use strict";
 const POLL_MS = 2000;
@@ -340,6 +364,179 @@ async function showSource(row, hit) {
     row.append(el("div", { class: "err", textContent: err.message }));
   }
 }
+
+// --- graph view (graphology + sigma, fed by /v1/graphql) -----------------
+
+// categorical identity colors, validated for light and dark surfaces
+const GRAPH_COLORS = matchMedia("(prefers-color-scheme: dark)").matches
+  ? { function: "#3987e5", class: "#d95926", file: "#199e70", module: "#c98500" }
+  : { function: "#2a78d6", class: "#eb6834", file: "#1baf7a", module: "#eda100" };
+const GRAPH_SIZES = { file: 9, class: 6.5, function: 4.5 };
+const GRAPH_SURFACE = matchMedia("(prefers-color-scheme: dark)").matches
+  ? "#171b21" : "#ffffff";
+
+function dim(color, amount) { // recess toward the surface for unhighlighted nodes
+  const hex = c => [1, 3, 5].map(i => parseInt(c.slice(i, i + 2), 16));
+  const mix = (a, b) => Math.round(a + (b - a) * amount);
+  const [r, g, b] = hex(color).map((v, i) => mix(v, hex(GRAPH_SURFACE)[i]));
+  return "#" + [r, g, b].map(v => v.toString(16).padStart(2, "0")).join("");
+}
+
+function graphQl(query, variables) {
+  return call("/v1/graphql", { query, variables });
+}
+
+function renderGraphLegend() {
+  const box = document.getElementById("graph-legend");
+  box.replaceChildren(...Object.entries(GRAPH_COLORS).map(([type, color]) =>
+    el("span", { class: "chip" },
+       el("span", { class: "swatch",
+         style: "background:" + color + ";width:" + GRAPH_SIZES[type] + "px;height:" + GRAPH_SIZES[type] + "px" }),
+       type)));
+}
+
+async function loadGraphScopes() {
+  try {
+    const data = await graphQl("{ modules { path } }");
+    const sel = document.getElementById("graph-scope");
+    const paths = data.data.modules.map(m => m.path);
+    sel.replaceChildren(...paths.map(p =>
+      el("option", { value: p, textContent: p === "" ? "(entire repo)" : p })));
+    if (!paths.length)
+      sel.replaceChildren(el("option", { textContent: "no modules indexed" }));
+    else if (paths.includes(""))
+      sel.value = "";  // whole-repo scope by default when it exists
+  } catch (err) { /* auth dialog handles this */ }
+}
+
+let graphRenderer = null;
+
+async function semanticHighlightSet(query) {
+  try {
+    const data = await graphQl(
+      "query($q: String!) { semanticSearch(query: $q, limit: 20) {"
+      + " node { ... on FunctionNode { qualifiedName }"
+      + "          ... on ClassNode { qualifiedName } } } }",
+      { q: query });
+    return new Set((data.data.semanticSearch || [])
+      .map(e => e.node && e.node.qualifiedName).filter(Boolean));
+  } catch (err) { return new Set(); }
+}
+
+async function drawGraph() {
+  const scope = document.getElementById("graph-scope").value;
+  const box = document.getElementById("graph");
+  const box0 = box.firstElementChild;
+  if (box0 && box0.classList.contains("empty")) box.replaceChildren();
+  if (graphRenderer) { graphRenderer.kill(); graphRenderer = null; }
+
+  let files = [];
+  try {
+    const data = await graphQl(
+      "query($path: String!) { module(path: $path) { files { path isTest" +
+      "  classes { name qualifiedName methods { qualifiedName callees { qualifiedName } } }" +
+      "  functions { qualifiedName callees { qualifiedName } } } } }",
+      { path: scope });
+    files = (data.data.module && data.data.module.files) || [];
+  } catch (err) {
+    box.replaceChildren(el("div", { class: "empty", textContent: err.message }));
+    return;
+  }
+
+  const graph = new graphology({ type: "directed", multi: false });
+  const byQname = new Map();
+  const detail = document.getElementById("graph-detail");
+  detail.textContent = "";
+
+  const addNode = (key, attrs) => { if (!graph.hasNode(key)) graph.addNode(key, attrs); };
+
+  for (const f of files) {
+    const fileKey = "file:" + f.path;
+    addNode(fileKey, { label: f.path.split("/").pop(), nodeType: "file",
+      color: GRAPH_COLORS.file, size: GRAPH_SIZES.file, full: f.path });
+    for (const c of f.classes)
+      addNode("class:" + c.qualifiedName, { label: c.name, nodeType: "class",
+        color: GRAPH_COLORS.class, size: GRAPH_SIZES.class, full: c.qualifiedName });
+    const fns = [...f.functions, ...f.classes.flatMap(c => c.methods)];
+    for (const fn of fns) {
+      const key = "fn:" + fn.qualifiedName;
+      addNode(key, { label: fn.qualifiedName, nodeType: "function",
+        color: GRAPH_COLORS.function, size: GRAPH_SIZES.function,
+        full: fn.qualifiedName, file: f.path, test: !!f.isTest });
+      byQname.set(fn.qualifiedName, key);
+    }
+  }
+
+  for (const f of files) {
+    const fns = [...f.functions, ...f.classes.flatMap(c => c.methods)];
+    for (const fn of fns)
+      for (const callee of fn.callees || []) {
+        const target = byQname.get(callee.qualifiedName);
+        const source = "fn:" + fn.qualifiedName;
+        if (target && target !== source && !graph.hasEdge(source, target))
+          graph.addEdge(source, target, { size: 1, color: dim(GRAPH_COLORS.function, .75) });
+      }
+  }
+
+  document.getElementById("graph-count").textContent =
+    graph.order ? "(" + graph.order + " nodes · " + graph.size + " calls)" : "";
+  if (!graph.order) {
+    box.replaceChildren(el("div", { class: "empty", textContent: "No entities indexed for this module." }));
+    return;
+  }
+
+  // forceatlas2 does not initialize missing positions: seed them or x/y stay NaN
+  graph.forEachNode((key, attrs) => {
+    if (!Number.isFinite(attrs.x) || !Number.isFinite(attrs.y)) {
+      graph.setNodeAttribute(key, "x", Math.random() * 100);
+      graph.setNodeAttribute(key, "y", Math.random() * 100);
+    }
+  });
+  forceAtlas2.assign(graph, { iterations: 80, settings: {
+    gravity: 1, scalingRatio: 12, barnesHutOptimize: true, slowDown: 4 } });
+
+  let highlight = null;
+  const qInput = document.getElementById("graph-q").value.trim();
+  if (qInput) highlight = await semanticHighlightSet(qInput);
+  if (highlight && highlight.size) {
+    // semantic hits are repo-wide; recessing only makes sense if some are in scope
+    const inScope = graph.someNode(key =>
+      !key.startsWith("file:") &&
+      highlight.has(key.slice(key.indexOf(":") + 1)));
+    if (!inScope) {
+      document.getElementById("graph-detail").textContent =
+        "no semantic matches inside this scope";
+      highlight = null;
+    }
+  }
+
+  graphRenderer = new Sigma(graph, box, {
+    minCameraRatio: .08, maxCameraRatio: 8, labelRenderedSizeThreshold: 6,
+    nodeReducer: (key, attrs) => {
+      if (highlight && highlight.size) {
+        const qname = key.startsWith("file:") ? null : key.slice(key.indexOf(":") + 1);
+        const hit = qname && highlight.has(qname);
+        if (hit) return { ...attrs, size: attrs.size * 1.9, forceLabel: true, zIndex: 1 };
+        return { ...attrs, color: dim(attrs.color, .55), zIndex: 0, label: null };
+      }
+      if (attrs.test) return { ...attrs, size: attrs.size * .8, color: dim(attrs.color, .3) };
+      return attrs;
+    },
+  });
+  graphRenderer.on("clickNode", ({ node }) => {
+    const attrs = graph.getNodeAttributes(node);
+    const bits = [attrs.nodeType, attrs.full || attrs.label];
+    if (attrs.file) bits.push(attrs.file + (attrs.test ? " (test)" : ""));
+    detail.textContent = bits.join(" · ");
+  });
+}
+
+document.getElementById("graph-form").addEventListener("submit", ev => {
+  ev.preventDefault();
+  drawGraph();
+});
+renderGraphLegend();
+loadGraphScopes();
 
 // keep "x ago" labels honest between polls if the server stalls
 setInterval(() => {
